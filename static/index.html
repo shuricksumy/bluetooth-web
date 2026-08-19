@@ -493,7 +493,15 @@
     statusEl.textContent = label || (on ? "working…" : "idle");
   }
 
+  // Home Assistant's Ingress serves this page under /api/hassio_ingress/<token>/
+  // and strips that prefix before it reaches us, so the browser must send its
+  // requests relative to the document. An absolute "/api/devices" would leave
+  // the prefix behind and hit Home Assistant itself instead.
+  const BASE = document.baseURI.replace(/[^/]*$/, "");
+  const api = (path) => BASE + String(path).replace(/^\//, "");
+
   async function call(url, options) {
+    url = api(url);
     let data = {};
     try {
       const res = await fetch(url, options);
@@ -636,6 +644,19 @@
     if (p.snapcast_error) return `<span class="muted">${esc(p.snapcast_error)}</span>`;
     const s = p.snapcast;
     if (!s) return `<span class="muted">not known to the snapserver yet</span>`;
+
+    // A stopped player has no snapclient process, so it is not playing anything
+    // and its transport and volume would be acting on a client that is not
+    // there. The snapserver still remembers the client and its last stream, so
+    // without this the row keeps showing a track -- "paused · Whatever" -- for a
+    // player that is plainly stopped.
+    if (!p.running) {
+      return `<span class="muted">${p.state === "stopped" ? "player stopped"
+                                   : "player " + esc(p.state)}</span>`;
+    }
+    if (s.connected === false) {
+      return `<span class="muted">not connected to the snapserver</span>`;
+    }
 
     const art = s.art_url
       ? `<img src="${esc(s.art_url)}" alt="" title="${esc(full0(s))}" onerror="this.style.display='none'">` : "";

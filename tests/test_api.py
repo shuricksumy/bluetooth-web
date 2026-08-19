@@ -802,3 +802,38 @@ def test_bad_settings_over_http_are_400(player_client):
     res = player_client.patch("/api/settings", json={"bt_name_template": "nope"})
     assert res.status_code == 400
     assert "{name}" in res.get_json()["error"]
+
+
+# ---- Home Assistant Ingress compatibility -----------------------------------
+
+
+def test_frontend_resolves_api_urls_relative_to_the_document():
+    """Ingress serves the page under /api/hassio_ingress/<token>/.
+
+    Home Assistant strips that prefix before proxying, so the browser has to
+    send requests relative to the document. An absolute "/api/devices" would
+    escape the prefix and hit Home Assistant itself, which is why the page is
+    routed through api() rather than fetching literal absolute paths.
+    """
+    page = open(os.path.join(ROOT, "static", "index.html")).read()
+    assert 'const api = (path) =>' in page
+    assert 'url = api(url);' in page
+    # No fetch() should bypass the helper with a root-absolute path.
+    assert 'fetch("/api' not in page
+    assert "fetch('/api" not in page
+    assert "fetch(`/api" not in page
+
+
+def test_a_stopped_player_shows_no_transport_or_track():
+    """A stopped player has no snapclient, so the row must not imply playback.
+
+    The snapserver still remembers the client and the stream it last used, so
+    without an explicit reset the row kept showing "paused · <track>" and live
+    transport buttons for a player that was plainly stopped.
+    """
+    page = open(os.path.join(ROOT, "static", "index.html")).read()
+    assert "if (!p.running) {" in page
+    assert "player stopped" in page
+    assert 'not connected to the snapserver' in page
+    # The reset has to come before the transport controls are built.
+    assert page.index("if (!p.running) {") < page.index('s.can_control')

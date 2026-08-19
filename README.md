@@ -140,6 +140,22 @@ its sockets. Check whether it applies to you:
 cat /sys/module/apparmor/parameters/enabled     # Y = enforcing
 ```
 
+## 🏠 Home Assistant
+
+The panel runs where the Bluetooth adapter and PipeWire session are, which is
+rarely the Home Assistant box — so it has no place in the sidebar, because
+Ingress only serves add-ons. A companion add-on proxies it in:
+
+[![Open your Home Assistant instance and show the add add-on repository dialog with a specific repository URL pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fshuricksumy%2Fhome-assistant-apps)
+[![Open your Home Assistant instance and show the dashboard of an add-on.](https://my.home-assistant.io/badges/supervisor_addon.svg)](https://my.home-assistant.io/redirect/supervisor_addon/?addon=bluetooth_web_proxy&repository_url=https%3A%2F%2Fgithub.com%2Fshuricksumy%2Fhome-assistant-apps)
+
+Add the repository with the first button, open the add-on with the second, set
+`server_host` / `server_port` (and the panel's `username` / `password` if you set
+one), start it and tick *Show in sidebar*. Home Assistant's own login sits in
+front, and it works through Nabu Casa like any other add-on.
+
+Source: [bluetooth_web_proxy](https://github.com/shuricksumy/home-assistant-apps/tree/main/bluetooth_web_proxy).
+
 ## 🔊 Players
 
 Pair a speaker on **Devices**, then **Players → Add player**. Choosing the device
