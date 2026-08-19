@@ -24,6 +24,9 @@ LABEL org.opencontainers.image.title="bluetooth-web" \
 #                    radio work happens in the host's daemon.
 #   python3-flask    the HTTP layer
 #   python3-pexpect  drives bluetoothctl's interactive REPL over a pty
+#   dbus-bin         dbus-send, used by the startup preflight. bluez pulls it in
+#                    transitively today, but the error reporting depends on it,
+#                    so it is named explicitly rather than left to chance.
 #   ca-certificates  so apt/TLS in derived builds behave
 RUN echo "cache epoch: ${REFRESH_WEEK}" && apt-get update && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
@@ -31,6 +34,7 @@ RUN echo "cache epoch: ${REFRESH_WEEK}" && apt-get update && apt-get upgrade -y 
     python3 \
     python3-flask \
     python3-pexpect \
+    dbus-bin \
     ca-certificates \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 

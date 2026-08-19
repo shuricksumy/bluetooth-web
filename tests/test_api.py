@@ -4,6 +4,7 @@ Nothing here needs a Bluetooth adapter, a D-Bus bus or root, so it runs in CI.
 """
 import importlib
 import os
+import stat
 import sys
 import threading
 import time
@@ -164,12 +165,24 @@ def test_missing_bluetoothctl_binary():
     assert "cannot start" in body["error"]
 
 
-def test_bluetoothctl_exits_immediately_points_at_the_dbus_mount():
-    res = load_app("exits").app.test_client().get("/api/devices")
+def test_bluetoothctl_exits_immediately_points_at_the_dbus_mount(tmp_path):
+    missing = str(tmp_path / "no_such_bus_socket")
+    app_module = load_app("exits", DBUS_SYSTEM_BUS_ADDRESS="unix:path=%s" % missing)
+    res = app_module.app.test_client().get("/api/devices")
     body = res.get_json()
     assert res.status_code == 503
     assert body["devices"] == []
-    assert "/run/dbus/system_bus_socket" in body["error"]
+    assert missing in body["error"]
+    assert "mount" in body["error"]
+
+
+def test_bluetoothctl_crash_with_a_healthy_bus_is_reported_plainly(monkeypatch):
+    """bluetoothctl 5.82 dumps core on a NULL bus; if the bus is fine, say so."""
+    app_module = load_app("exits")
+    monkeypatch.setattr(app_module.btctl.__class__.__module__ and
+                        sys.modules["btctl"], "diagnose_dbus", lambda: None)
+    body = app_module.app.test_client().get("/api/devices").get_json()
+    assert "exited immediately" in body["error"]
 
 
 def test_no_controller_returns_503_not_a_traceback():
@@ -186,11 +199,84 @@ def test_no_controller_returns_503_not_a_traceback():
     assert "controller" in res.get_json()["error"]
 
 
-def test_bluetoothd_never_answers():
-    res = load_app("hangs", start_timeout=3.0).app.test_client().get("/api/devices")
+def test_bluetoothd_never_answers(monkeypatch):
+    app_module = load_app("hangs", start_timeout=3.0)
+    # A healthy bus, so the diagnosis must fall through to "bluetoothd is not
+    # answering" rather than blaming the socket.
+    monkeypatch.setattr(sys.modules["btctl"], "diagnose_dbus", lambda: None)
+    res = app_module.app.test_client().get("/api/devices")
     body = res.get_json()
     assert res.status_code == 503
     assert "bluetoothd" in body["error"]
+
+
+# ---- D-Bus preflight --------------------------------------------------------
+
+
+def _fake_dbus_send(tmp_path, exit_code, stderr):
+    """Put a stub `dbus-send` at the front of PATH."""
+    binary = tmp_path / "dbus-send"
+    binary.write_text(
+        "#!/bin/sh\ncat >&2 <<'EOM'\n%s\nEOM\nexit %d\n" % (stderr, exit_code)
+    )
+    binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+    return str(tmp_path)
+
+
+def _present_socket(tmp_path):
+    """A stand-in bus socket: diagnose_dbus() only checks that the path exists.
+
+    A real AF_UNIX socket would be more faithful but macOS caps those paths at
+    104 characters, which pytest's tmp_path routinely exceeds.
+    """
+    path = tmp_path / "system_bus_socket"
+    path.touch()
+    return str(path)
+
+
+def test_diagnose_reports_a_missing_socket(tmp_path, monkeypatch):
+    import btctl
+
+    missing = str(tmp_path / "absent")
+    monkeypatch.setenv("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=%s" % missing)
+    message = btctl.diagnose_dbus()
+    assert missing in message
+    assert "mount" in message
+
+
+def test_diagnose_names_apparmor_rather_than_the_mount(tmp_path, monkeypatch):
+    """The Ubuntu 24.04 failure: socket mounted fine, host policy denies Hello."""
+    import btctl
+
+    path = _present_socket(tmp_path)
+    monkeypatch.setenv("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=%s" % path)
+    monkeypatch.setenv(
+        "PATH",
+        _fake_dbus_send(
+            tmp_path,
+            1,
+            'Failed to open connection to "system" message bus: An AppArmor '
+            'policy prevents this sender from sending this message to this '
+            'recipient; member="Hello"',
+        )
+        + os.pathsep
+        + os.environ["PATH"],
+    )
+    message = btctl.diagnose_dbus()
+    assert "AppArmor" in message
+    assert "apparmor=unconfined" in message
+    assert "mounted correctly" in message
+
+
+def test_diagnose_stays_quiet_when_the_bus_is_healthy(tmp_path, monkeypatch):
+    import btctl
+
+    path = _present_socket(tmp_path)
+    monkeypatch.setenv("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=%s" % path)
+    monkeypatch.setenv(
+        "PATH", _fake_dbus_send(tmp_path, 0, "") + os.pathsep + os.environ["PATH"]
+    )
+    assert btctl.diagnose_dbus() is None
 
 
 def test_old_bluez_still_lists_devices_but_warns_once():

@@ -38,8 +38,10 @@ plain D-Bus client against the host's daemon, so the host keeps owning the radio
 - **No build step, no pip.** Vanilla JS in a single static page; Flask and pexpect
   come from Debian packages, so security updates arrive with a plain rebuild.
 - **Optional HTTP Basic Auth** via `ADMIN_PASSWORD`.
-- **Degrades honestly.** No adapter, no bluetoothd or no D-Bus socket produces a
-  clear message in the UI, not a spinner and not a 500.
+- **Degrades honestly.** No adapter, no bluetoothd, no D-Bus socket or an
+  AppArmor denial each produce a specific message in the UI, not a spinner and
+  not a 500. On startup failure it asks D-Bus directly what went wrong rather
+  than guessing from `bluetoothctl`'s core dump.
 
 ## 🚀 Quick start
 
@@ -88,6 +90,9 @@ BlueZ **5.65 or newer** is what the filtered `devices` subcommands need
 (Debian 12+, Ubuntu 22.10+). On anything older the table still lists devices, but
 the Paired/Connected/Trusted badges stay blank and the panel says so.
 
+On **Ubuntu** you will also need `security_opt: [apparmor=unconfined]` — see
+[AppArmor hosts](#️-apparmor-hosts-ubuntu-the-socket-is-not-enough).
+
 ## ⚙️ Configuration
 
 | Variable | Default | Description |
@@ -118,6 +123,51 @@ This is the whole host interface. Two things worth knowing:
 Nothing else is needed. In particular this image deliberately does **not** use
 `--privileged`, `--cap-add`, `network_mode: host` or `/dev/*` passthrough: the
 container never touches the adapter, it asks the host's `bluetoothd` to.
+
+### ⚠️ AppArmor hosts (Ubuntu): the socket is not enough
+
+On a host with AppArmor enforcing — Ubuntu 24.04 out of the box — mounting the
+socket correctly is **still not enough**. Docker confines containers with the
+`docker-default` profile, which grants no D-Bus rules, and the kernel's D-Bus
+mediation (`acquire send receive`) then denies the container's very first
+message:
+
+```
+An AppArmor policy prevents this sender from sending this message to this
+recipient; member="Hello" destination="org.freedesktop.DBus"
+```
+
+Without the `Hello` the container can never register on the bus. Worse,
+`bluetoothctl` 5.82 does not check the result of `dbus_bus_get()`, so the NULL
+connection trips an assertion and the process **dumps core** — it does not print
+a useful error. (It crashes the same way on `bluetoothctl --help`.) The panel
+detects this case explicitly and says so instead of blaming the mount.
+
+The blunt fix, and the usual one for D-Bus containers:
+
+```yaml
+services:
+  bluetooth-web:
+    security_opt:
+      - apparmor=unconfined
+```
+
+That drops only the AppArmor profile. Seccomp, capabilities, namespaces and the
+read-only root filesystem of the host are all untouched, and the container still
+has nothing but the one socket. It is a much smaller step than `--privileged`.
+
+The targeted alternative is a custom profile that starts from `docker-default`
+and adds D-Bus rules, loaded with `apparmor_parser -r -W /etc/apparmor.d/<name>`
+and selected with `security_opt: [apparmor=<name>]`. Better posture, more
+moving parts.
+
+**Debian, Alpine, or any host without AppArmor enforcement needs none of this.**
+Check with:
+
+```bash
+cat /sys/module/apparmor/parameters/enabled     # Y means it is enforcing
+docker inspect <container> --format '{{.AppArmorProfile}}'
+```
 
 ## 🔒 Security
 

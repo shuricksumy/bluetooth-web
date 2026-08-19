@@ -18,6 +18,7 @@ holding it.
 
 import os
 import re
+import subprocess
 import threading
 import time
 
@@ -70,6 +71,71 @@ class BluetoothBusy(BluetoothctlError):
     status = 409
 
 
+def bus_socket_path(address=None):
+    """The filesystem path out of a DBUS_SYSTEM_BUS_ADDRESS value."""
+    address = address or os.environ.get(
+        "DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/run/dbus/system_bus_socket"
+    )
+    for part in address.split(","):
+        for field in part.split(";"):
+            if field.startswith("unix:path="):
+                return field[len("unix:path="):]
+    return None
+
+
+def diagnose_dbus():
+    """Explain why the system bus is unusable, or return None if it is fine.
+
+    bluetoothctl 5.82 does not check the result of dbus_bus_get(): when the bus
+    refuses it, the NULL connection trips an assertion and the process dumps
+    core, so all the wrapper sees is an immediate EOF. That looked exactly like
+    a missing socket and the old message said so -- which is wrong and costly
+    when the socket is mounted correctly and the host is simply denying the
+    connection. Ask D-Bus directly instead of guessing.
+    """
+    path = bus_socket_path()
+    if path and not os.path.exists(path):
+        return (
+            "the D-Bus socket %s is not present inside the container -- mount the "
+            "host's system bus with `-v %s:%s`" % (path, path, path)
+        )
+
+    try:
+        probe = subprocess.run(
+            [
+                "dbus-send", "--system", "--print-reply",
+                "--dest=org.freedesktop.DBus", "/",
+                "org.freedesktop.DBus.Peer.Ping",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None  # no dbus-send to ask; fall back to the generic message
+
+    if probe.returncode == 0:
+        return None
+
+    error = " ".join(((probe.stderr or "") + " " + (probe.stdout or "")).split())
+    if "AppArmor" in error:
+        return (
+            "the host's AppArmor policy is blocking this container from registering "
+            "on the system bus (the D-Bus \"Hello\" was denied). The socket is "
+            "mounted correctly -- this is a host policy, not a mount problem. "
+            "Docker confines containers with the `docker-default` profile, which "
+            "grants no D-Bus rules, and Ubuntu's kernel enforces D-Bus mediation. "
+            "Add `security_opt: [\"apparmor=unconfined\"]` to this service, or "
+            "install an AppArmor profile that permits dbus. See the README."
+        )
+    if "Failed to connect" in error or "No such file" in error:
+        return (
+            "cannot reach the system D-Bus at %s -- check the socket bind mount. "
+            "(%s)" % (path, error[:200])
+        )
+    return "the system D-Bus refused this container: %s" % error[:300]
+
+
 def strip_ansi(text):
     return ANSI.sub("", text or "").replace("\r", "").replace("\x1b", "")
 
@@ -109,14 +175,15 @@ class Bluetoothctl:
             child.expect(PROMPT, timeout=START_TIMEOUT)
         except pexpect.EOF:
             raise BluetoothUnavailable(
-                "bluetoothctl exited immediately -- is the host's D-Bus socket "
-                "mounted at /run/dbus/system_bus_socket?"
+                diagnose_dbus()
+                or "bluetoothctl exited immediately without reaching its prompt"
             ) from None
         except pexpect.TIMEOUT:
             child.terminate(force=True)
             raise BluetoothUnavailable(
-                "bluetoothctl never reached its prompt -- bluetoothd is probably "
-                "not running on the host"
+                diagnose_dbus()
+                or "bluetoothctl never reached its prompt -- bluetoothd is "
+                "probably not running on the host"
             ) from None
 
         self._child = child

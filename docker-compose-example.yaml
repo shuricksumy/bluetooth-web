@@ -8,6 +8,15 @@ services:
     ports:
       - "8088:8080"
 
+    # Ubuntu (and any AppArmor host): Docker confines containers with the
+    # `docker-default` profile, which grants no D-Bus rules, so the kernel's
+    # D-Bus mediation denies the container's "Hello" and it can never register
+    # on the system bus -- bluetoothctl then dumps core. The socket mount is
+    # fine; this is host policy. Uncomment on such hosts. Not needed on Debian,
+    # Alpine or any host without AppArmor enforcement.
+    #security_opt:
+    #  - apparmor=unconfined
+
     volumes:
       # The one and only thing this container needs from the host. Read-write is
       # required: D-Bus is a bidirectional socket, :ro breaks the connection.
