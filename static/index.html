@@ -86,6 +86,15 @@
   }
   .field .hint2 { grid-column: 2; font-size: .74rem; color: var(--muted); margin-top: -.3rem; }
   .dlg-actions { display: flex; justify-content: flex-end; gap: .4rem; margin-top: .9rem; }
+  .np { display: flex; align-items: center; gap: .5rem; margin-top: .25rem; }
+  .np img { width: 34px; height: 34px; border-radius: 4px; object-fit: cover; flex: 0 0 auto; }
+  .np-text { min-width: 0; }
+  .np-title { font-size: .82rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .np-artist { font-size: .74rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .transport button { padding: .22rem .45rem; font-size: .9rem; line-height: 1; }
+  .vol { display: flex; align-items: center; gap: .35rem; margin-top: .3rem; }
+  .vol input[type=range] { width: 8rem; }
+  .vol span { font-size: .72rem; color: var(--muted); min-width: 2.4rem; }
   pre.logs {
     background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
     padding: .6rem; font-size: .74rem; max-height: 20rem; overflow: auto; margin: 0;
@@ -113,6 +122,7 @@
       </select>
     </label>
     <button id="scan" class="primary devices-only">Scan for new devices</button>
+    <button id="playerSettings" class="players-only" hidden title="defaults for new players">⚙</button>
     <button id="addPlayer" class="primary players-only" hidden>Add player</button>
   </header>
 
@@ -147,7 +157,7 @@
     <h2>Snapcast players <span class="count" id="playerCount"></span></h2>
     <div class="card">
       <table>
-        <thead><tr><th>Player</th><th>Sink</th><th>Server</th><th>State</th><th></th></tr></thead>
+        <thead><tr><th>Player</th><th>Now playing</th><th>State</th><th></th></tr></thead>
         <tbody id="playerRows"></tbody>
       </table>
       <div id="playerEmpty" class="empty">
@@ -223,6 +233,26 @@
     </form>
   </dialog>
 
+  <dialog id="settingsDialog">
+    <form method="dialog" id="settingsForm">
+      <h3>Defaults for new players</h3>
+      <div class="field">
+        <label for="fBtTemplate">Bluetooth name</label>
+        <input type="text" id="fBtTemplate" required maxlength="80">
+        <div class="hint2">
+          How a Bluetooth output is named when you add it. <code>{name}</code> is the
+          device's own name. Set it to just <code>{name}</code> to drop the marker.
+        </div>
+      </div>
+      <div id="settingsPreview" class="hint" style="margin:.2rem 0 0"></div>
+      <div id="settingsError" class="note err" style="display:none"></div>
+      <div class="dlg-actions">
+        <button type="button" id="settingsCancel">Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="logDialog">
     <h3 id="logTitle">Logs</h3>
     <pre class="logs" id="logBody">…</pre>
@@ -245,6 +275,7 @@
 
   let busy = false;         // an action or scan owns the UI: pause polling
   let pollMs = 5000;
+  let snapDefaults = { host: "", port: 1704, control_port: 1705, web_port: 1780 };
   let timer = null;
   let lastAction = "";
 
@@ -438,6 +469,10 @@
   let lastPlayers = [];
   let lastSinks = [];
   let editing = null;   // player id when editing, null when adding
+  let settings = { bt_name_template: "{name} (BT)" };
+
+  const applyTemplate = (base, bt) =>
+    bt ? settings.bt_name_template.replace("{name}", base) : base;
 
   const secs = (n) => {
     n = Math.floor(n);
@@ -467,23 +502,105 @@
         : (p.restarts ? ` <span class="muted">${p.restarts} restarts</span>` : "");
 
       tr.innerHTML =
-        `<td>${esc(p.name)}</td>` +
-        `<td>${sink}</td>` +
-        `<td class="mac">${esc(p.server)}:${p.port}</td>` +
-        `<td><span class="state ${esc(p.state)}">${esc(p.state)}</span>${detail}${meta}</td>` +
+        `<td>${esc(p.name)}${p.mac ? ` <span class="badge on">BT</span>` : ""}` +
+          `<div class="muted" style="font-size:.72rem">${sink}</div></td>` +
+        `<td>${nowPlaying(p)}</td>` +
+        `<td><span class="state ${esc(p.state)}">${esc(p.state)}</span>${detail}${meta}` +
+          `<div class="muted" style="font-size:.72rem">${esc(p.server)}:${p.port}</div></td>` +
         `<td class="actions">` +
           (p.running
             ? `<button data-do="stop">Stop</button><button data-do="restart">Restart</button>`
             : `<button data-do="start" class="primary">Start</button>`) +
           `<button data-do="logs">Logs</button>` +
+          snapwebLink(p) +
           `<button data-do="edit">Edit</button>` +
           `<button data-do="delete" class="danger">Delete</button>` +
         `</td>`;
 
-      tr.querySelectorAll("button").forEach((b) =>
+      tr.querySelectorAll("button[data-do]").forEach((b) =>
         b.addEventListener("click", () => playerAction(b.dataset.do, p)));
+      tr.querySelectorAll("button[data-cmd]").forEach((b) =>
+        b.addEventListener("click", () => transport(p, b.dataset.cmd)));
+      const slider = tr.querySelector("input[type=range]");
+      if (slider) slider.addEventListener("change", () => setVolume(p, slider.value));
+      const mute = tr.querySelector("button[data-mute]");
+      if (mute) mute.addEventListener("click", () => toggleMute(p, mute.dataset.mute === "1"));
       rows.appendChild(tr);
     }
+  }
+
+  function nowPlaying(p) {
+    if (p.snapcast_error) return `<span class="muted">${esc(p.snapcast_error)}</span>`;
+    const s = p.snapcast;
+    if (!s) return `<span class="muted">not known to the snapserver yet</span>`;
+
+    const art = s.art_url
+      ? `<img src="${esc(s.art_url)}" alt="" onerror="this.style.display='none'">` : "";
+    const title = s.title
+      ? `<div class="np-title">${esc(s.title)}</div>
+         <div class="np-artist">${esc(s.artist || s.album || "")}</div>`
+      : `<div class="np-artist">${esc(s.stream_id || "no stream")} — ${esc(s.stream_status || "idle")}</div>`;
+
+    // Only offer what this stream says it supports; the flags differ per stream
+    // and change at runtime. A plain pipe stream gets no buttons at all.
+    let controls = "";
+    if (s.can_control) {
+      const playing = s.playback_status === "playing";
+      const b = (cmd, glyph, on, title) =>
+        `<button data-cmd="${cmd}" ${on ? "" : "disabled"} title="${title}">${glyph}</button>`;
+      controls =
+        `<span class="transport">` +
+        b("previous", "⏮", s.can_prev, "previous") +
+        (playing ? b("pause", "⏸", s.can_pause, "pause") : b("play", "▶", true, "play")) +
+        b("next", "⏭", s.can_next, "next") +
+        `</span>`;
+    }
+
+    const vol = (s.volume === null || s.volume === undefined) ? "" :
+      `<div class="vol">
+         <button data-mute="${s.muted ? 1 : 0}" title="${s.muted ? "unmute" : "mute"}">${s.muted ? "🔇" : "🔊"}</button>
+         <input type="range" min="0" max="100" value="${s.volume}">
+         <span>${s.volume}%</span>
+       </div>`;
+
+    return `<div class="np">${art}<div class="np-text">${title}</div>${controls}</div>${vol}`;
+  }
+
+  function snapwebLink(p) {
+    // Snapweb owns groups, stream assignment and every client on the server --
+    // deliberately more than this panel does. Link rather than duplicate.
+    const port = snapDefaults.web_port;
+    if (!p.server || !port) return "";
+    return `<a href="http://${esc(p.server)}:${port}/" target="_blank" rel="noopener">` +
+           `<button title="open this player's server in Snapweb">Snapweb</button></a>`;
+  }
+
+  async function transport(player, command) {
+    setBusy(true, `${command}…`);
+    const data = await call(
+      `/api/players/${encodeURIComponent(player.id)}/control/${command}`,
+      { method: "POST" });
+    setNotes(data, null);
+    if (data.players) renderPlayers(data.players);
+    setBusy(false, "");
+  }
+
+  async function setVolume(player, percent) {
+    const data = await call(`/api/players/${encodeURIComponent(player.id)}/volume`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ percent: Number(percent) }),
+    });
+    setNotes(data, null);
+    if (data.players) renderPlayers(data.players);
+  }
+
+  async function toggleMute(player, muted) {
+    const data = await call(`/api/players/${encodeURIComponent(player.id)}/volume`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ muted: !muted }),
+    });
+    setNotes(data, null);
+    if (data.players) renderPlayers(data.players);
   }
 
   async function playerAction(what, player) {
@@ -543,7 +660,8 @@
     if (!opt) return;
     if (!$("fName").value || $("fName").dataset.auto === "1") {
       // Snapcast host ids travel through Music Assistant; keep them tame.
-      $("fName").value = opt.name.replace(/[^A-Za-z0-9 ._-]/g, "").slice(0, 64);
+      const base = opt.name.replace(/[^A-Za-z0-9 ._-]/g, "").trim();
+      $("fName").value = applyTemplate(base, opt.bt).slice(0, 64);
       $("fName").dataset.auto = "1";
     }
     $("fPwLatency").value = opt.bt ? "1024/48000" : "2048/192000";
@@ -587,8 +705,10 @@
       $("fName").dataset.auto = "1";
       // The snapserver is almost always the box you are browsing this on --
       // that is exactly how the existing players on this host are configured.
-      $("fServer").value = (lastPlayers[0] && lastPlayers[0].server) || location.hostname;
-      $("fPort").value = 1704;
+      $("fServer").value = snapDefaults.host
+        || (lastPlayers[0] && lastPlayers[0].server)
+        || location.hostname;
+      $("fPort").value = (lastPlayers[0] && lastPlayers[0].port) || snapDefaults.port;
       $("fLatency").value = 0;
       $("fVolume").value = 1.0;
       $("fUseAlsa").value = "true";
@@ -645,6 +765,38 @@
     if (sinks.sinks) lastSinks = sinks.sinks;
   }
 
+  function previewTemplate() {
+    const tpl = $("fBtTemplate").value;
+    const ok = tpl.includes("{name}");
+    $("settingsPreview").textContent = ok
+      ? `A speaker called "JBL Charge 5" becomes "${tpl.replace("{name}", "JBL Charge 5")}"`
+      : "The template must contain {name}.";
+  }
+
+  function openSettings() {
+    $("fBtTemplate").value = settings.bt_name_template;
+    $("settingsError").style.display = "none";
+    previewTemplate();
+    $("settingsDialog").showModal();
+  }
+
+  async function saveSettings(event) {
+    event.preventDefault();
+    const data = await call("/api/settings", {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bt_name_template: $("fBtTemplate").value }),
+    });
+    if (data.error) {
+      const box = $("settingsError");
+      box.textContent = data.error;
+      box.style.display = "block";
+      return;
+    }
+    settings = data.settings;
+    $("settingsDialog").close();
+    setNotes({}, "defaults saved");
+  }
+
   // --- tabs --------------------------------------------------------------------
 
   function showTab(which) {
@@ -661,6 +813,10 @@
   $("tabDevices").addEventListener("click", () => showTab("devices"));
   $("tabPlayers").addEventListener("click", () => showTab("players"));
   $("addPlayer").addEventListener("click", () => openDialog(null));
+  $("playerSettings").addEventListener("click", openSettings);
+  $("settingsForm").addEventListener("submit", saveSettings);
+  $("settingsCancel").addEventListener("click", () => $("settingsDialog").close());
+  $("fBtTemplate").addEventListener("input", previewTemplate);
   $("fSource").addEventListener("change", () =>
     applySource(sourceOptions().find((o) => o.value === $("fSource").value)));
   $("playerForm").addEventListener("submit", savePlayer);
@@ -676,6 +832,9 @@
   (async () => {
     const cfg = await call("/api/config");
     if (cfg.poll_seconds) pollMs = cfg.poll_seconds * 1000;
+    if (cfg.snapserver) snapDefaults = cfg.snapserver;
+    const st = await call("/api/settings");
+    if (st.settings) settings = st.settings;
     await loadAdapters();
     await refresh();
     await refreshPlayers();

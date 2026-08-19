@@ -78,7 +78,6 @@ def test_an_explicit_node_wins_over_the_derived_one(supervisor):
     [
         ({"name": ""}, "name"),
         ({"name": "x" * 80}, "name"),
-        ({"name": "rm -rf /; echo"}, "name"),
         ({"mac": "nope"}, "MAC"),
         ({"server": "host with spaces"}, "server"),
         ({"port": 0}, "port"),
@@ -95,6 +94,32 @@ def test_bad_definitions_are_rejected(bad, message):
     with pytest.raises(PlayerError) as err:
         validate(config)
     assert message.lower() in str(err.value).lower()
+
+
+def test_names_are_passed_as_one_argument_not_through_a_shell(supervisor):
+    """Shell metacharacters in a name are harmless: argv is a list.
+
+    That is why the name pattern only bars control characters -- rejecting
+    punctuation would block "BT · Kitchen" and Cyrillic names for no gain.
+    """
+    player = make(supervisor, name="rm -rf /; echo hi")
+    player.start()
+    assert wait_for(lambda: player.state == "running")
+    argv = player._proc.args
+    assert argv[argv.index("--hostID") + 1] == "rm -rf /; echo hi"
+    player.stop()
+
+
+def test_unicode_names_are_accepted(supervisor):
+    for name in ("BT · Kitchen", "Кухня", "Küche"):
+        cleaned = validate({"name": name, "server": "127.0.0.1"})
+        assert cleaned["name"] == name
+
+
+@pytest.mark.parametrize("bad", ["with\nnewline", "with\x00null", "tab\there"])
+def test_control_characters_in_names_are_rejected(bad):
+    with pytest.raises(PlayerError):
+        validate({"name": bad, "server": "127.0.0.1"})
 
 
 def test_duplicate_names_are_rejected(supervisor):
@@ -377,3 +402,64 @@ def test_a_player_with_no_node_is_not_watchdogged(supervisor, monkeypatch):
     assert player.state == "running"
     assert player.restarts == 0
     player.stop()
+
+
+# ---- panel settings ---------------------------------------------------------
+
+
+def test_bt_name_template_defaults_to_a_marker(supervisor):
+    assert supervisor.settings["bt_name_template"] == "{name} (BT)"
+    assert supervisor.suggest_name("JBL Charge 5", bluetooth=True) == "JBL Charge 5 (BT)"
+    # A wired sink is not marked.
+    assert supervisor.suggest_name("Topping DX3", bluetooth=False) == "Topping DX3"
+
+
+def test_the_marker_is_configurable_not_hardcoded(supervisor):
+    supervisor.update_settings({"bt_name_template": "BT · {name}"})
+    assert supervisor.suggest_name("JBL", bluetooth=True) == "BT · JBL"
+
+    # ... and can be removed entirely.
+    supervisor.update_settings({"bt_name_template": "{name}"})
+    assert supervisor.suggest_name("JBL", bluetooth=True) == "JBL"
+
+
+def test_settings_persist(supervisor, tmp_path):
+    supervisor.update_settings({"bt_name_template": "{name} [bt]"})
+    reloaded = Supervisor(config_path=str(tmp_path / "players.json"))
+    assert reloaded.settings["bt_name_template"] == "{name} [bt]"
+
+
+@pytest.mark.parametrize("bad,why", [
+    ({"bt_name_template": "no placeholder"}, "{name}"),
+    ({"bt_name_template": "{name} " + "x" * 100}, "too long"),
+    ({"bt_name_template": "{name}\ttab"}, "printable"),
+    ({"nonsense": 1}, "unknown setting"),
+])
+def test_bad_settings_are_rejected(supervisor, bad, why):
+    # players_mod, not a fresh `from players import ...`: test_api.py reloads
+    # the module, so a re-import here would yield a *different* SettingsError
+    # class than the one this supervisor raises, and pytest.raises would miss it.
+    with pytest.raises(players_mod.SettingsError) as err:
+        supervisor.update_settings(bad)
+    assert why.lower() in str(err.value).lower()
+    # The rejected value must not have been kept.
+    assert supervisor.settings["bt_name_template"] == "{name} (BT)"
+
+
+def test_markup_in_a_name_is_allowed_and_escaped_on_render(supervisor):
+    """"<script>" is not dangerous here: argv is a list and the UI escapes.
+
+    Rejecting it would be security theatre that also blocks legitimate
+    punctuation, so it is accepted -- and index.html runs every name through
+    esc() before inserting it.
+    """
+    player = make(supervisor, name="Kitchen <b>")
+    assert player.config["name"] == "Kitchen <b>"
+    page = open(os.path.join(ROOT, "static", "index.html")).read()
+    assert "esc(p.name)" in page
+
+
+def test_a_corrupt_settings_block_falls_back(tmp_path):
+    path = tmp_path / "players.json"
+    path.write_text('{"settings": {"bt_name_template": "broken"}, "players": []}')
+    assert Supervisor(config_path=str(path)).settings["bt_name_template"] == "{name} (BT)"

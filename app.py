@@ -20,8 +20,9 @@ import time
 from flask import Flask, jsonify, request, send_from_directory
 
 import players as players_mod
+import snapctl
 from btctl import Bluetoothctl, BluetoothBusy, BluetoothctlError, StepFailure
-from players import PlayerError, Supervisor
+from players import PlayerError, SettingsError, Supervisor
 
 # A MAC and nothing else. This is the only user-controlled value that reaches
 # bluetoothctl's stdin, and the REPL takes one command per line, so a MAC
@@ -145,6 +146,16 @@ def action(mac, func, label):
     return jsonify(devices_payload(devices, ok=True, action=label, output=output.strip()))
 
 
+@app.errorhandler(snapctl.SnapcastError)
+def handle_snapcast_error(exc):
+    return jsonify(ok=False, error=str(exc)), exc.status
+
+
+@app.errorhandler(SettingsError)
+def handle_settings_error(exc):
+    return jsonify(ok=False, error=str(exc)), exc.status
+
+
 @app.errorhandler(PlayerError)
 def handle_player_error(exc):
     return jsonify(ok=False, error=str(exc)), exc.status
@@ -166,7 +177,29 @@ def index():
 
 @app.get("/api/config")
 def api_config():
-    return jsonify(poll_seconds=POLL_SECONDS, auth=bool(ADMIN_PASSWORD))
+    return jsonify(
+        poll_seconds=POLL_SECONDS,
+        auth=bool(ADMIN_PASSWORD),
+        # Seeds the Add-player form. An empty host means the page falls back to
+        # whatever it was browsed on.
+        snapserver={
+            "host": players_mod.SNAPSERVER_HOST,
+            "port": players_mod.SNAPSERVER_PORT,
+            "control_port": players_mod.SNAPSERVER_CONTROL_PORT,
+            "web_port": players_mod.SNAPSERVER_WEB_PORT,
+        },
+    )
+
+
+@app.get("/api/settings")
+def api_get_settings():
+    return jsonify(settings=supervisor.settings)
+
+
+@app.patch("/api/settings")
+def api_patch_settings():
+    settings = supervisor.update_settings(request.get_json(silent=True) or {})
+    return jsonify(ok=True, settings=settings)
 
 
 @app.get("/api/adapters")
@@ -243,6 +276,89 @@ def api_player_action(player_id, action):
     if action in ("start", "restart"):
         player.start()
     return jsonify(ok=True, players=supervisor.list())
+
+
+@app.post("/api/players/<player_id>/control/<command>")
+def api_player_control(player_id, command):
+    """Transport control. Snapcast has no "stop" -- pause is the stop.
+
+    The command acts on the *stream* the player's group is attached to, so it
+    affects every client in that group, exactly like pressing pause in Snapweb
+    or Music Assistant.
+    """
+    player = supervisor.get(player_id)
+    if command not in snapctl.COMMANDS:
+        return jsonify(ok=False, error="unsupported command"), 404
+
+    host = player.config["server"]
+    port = player.config.get("control_port", snapctl.DEFAULT_CONTROL_PORT)
+    info = snapctl.describe(host, port, player.client_id, use_cache=False)
+    if info is None:
+        return jsonify(ok=False, error="the snapserver does not know this client"), 404
+    if not info["can_control"]:
+        return jsonify(
+            ok=False,
+            error="stream %r does not support transport control" % info["stream_id"],
+        ), 409
+
+    snapctl.control(host, port, info["stream_id"], command)
+    return jsonify(ok=True, players=supervisor.list())
+
+
+@app.post("/api/players/<player_id>/volume")
+def api_player_volume(player_id):
+    player = supervisor.get(player_id)
+    body = request.get_json(silent=True) or {}
+    percent, muted = body.get("percent"), body.get("muted")
+    if percent is None and muted is None:
+        return jsonify(ok=False, error="percent or muted is required"), 400
+    if percent is not None:
+        try:
+            percent = int(percent)
+        except (TypeError, ValueError):
+            return jsonify(ok=False, error="percent must be a number"), 400
+        if not 0 <= percent <= 100:
+            return jsonify(ok=False, error="percent must be 0-100"), 400
+
+    snapctl.set_volume(
+        player.config["server"],
+        player.config.get("control_port", snapctl.DEFAULT_CONTROL_PORT),
+        player.client_id, percent=percent, muted=muted,
+    )
+    return jsonify(ok=True, players=supervisor.list())
+
+
+@app.get("/api/snapcast/stale")
+def api_stale_clients():
+    """Clients the snapserver still remembers but nothing is using.
+
+    Snapcast keeps a client forever once it has connected, so deleting a player
+    here leaves a ghost in Snapweb and Music Assistant until someone removes it.
+    """
+    players = supervisor.list(with_snapcast=False)
+    if not players:
+        return jsonify(stale=[])
+    first = players[0]
+    stale = snapctl.stale_clients(
+        first["server"], first.get("control_port", snapctl.DEFAULT_CONTROL_PORT)
+    )
+    known = {p["client_id"] for p in players}
+    return jsonify(stale=[c for c in stale if c["id"] not in known])
+
+
+@app.delete("/api/snapcast/client/<path:client_id>")
+def api_delete_stale(client_id):
+    players = supervisor.list(with_snapcast=False)
+    if not players:
+        return jsonify(ok=False, error="no player knows which server to ask"), 400
+    if client_id in {p["client_id"] for p in players}:
+        return jsonify(ok=False, error="that client belongs to a live player"), 409
+    first = players[0]
+    snapctl.delete_client(
+        first["server"], first.get("control_port", snapctl.DEFAULT_CONTROL_PORT),
+        client_id,
+    )
+    return jsonify(ok=True)
 
 
 @app.get("/api/players/<player_id>/logs")

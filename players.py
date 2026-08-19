@@ -27,6 +27,8 @@ import time
 import uuid
 from collections import deque
 
+import snapctl
+
 CONFIG_DIR = os.environ.get("CONFIG_DIR", "/config")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "players.json")
 
@@ -56,24 +58,83 @@ SINK_GRACE = 15.0
 
 LOG_LINES = 200
 
-NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$")
+# Any printable text, up to 64 characters. Deliberately permissive: names are
+# passed to snapclient as a single argv element, never through a shell, so the
+# pattern is not a security boundary -- it only keeps control characters (which
+# would corrupt the log stream and the JSON config) out. An ASCII-only rule
+# rejected perfectly reasonable names like "BT · Kitchen" and anything Cyrillic.
+NAME_RE = re.compile(r"[^\x00-\x1f\x7f]{1,64}")
 NODE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.:_-]{0,255}$")
 LATENCY_RE = re.compile(r"^\d{1,7}/\d{1,7}$")
+
+def _env_int(name, fallback):
+    try:
+        return int(os.environ.get(name) or fallback)
+    except ValueError:
+        return fallback
+
+
+# Defaults for a newly created player. Every one is overridable per player in
+# the UI; these just decide what the Add-player form starts with, so a host with
+# a snapserver somewhere else only has to be told once.
+SNAPSERVER_HOST = os.environ.get("SNAPSERVER_HOST", "")
+SNAPSERVER_PORT = _env_int("SNAPSERVER_PORT", 1704)
+SNAPSERVER_CONTROL_PORT = _env_int("SNAPSERVER_CONTROL_PORT", snapctl.DEFAULT_CONTROL_PORT)
+# Snapserver's own web UI (snapweb). Not used by the panel, just linked to:
+# it owns groups, stream assignment and every client on the server, which is
+# deliberately more than this panel tries to be.
+SNAPSERVER_WEB_PORT = _env_int("SNAPSERVER_WEB_PORT", 1780)
 
 DEFAULTS = {
     "name": "",
     "mac": "",
     "node": "",
-    "server": "127.0.0.1",
-    "port": 1704,
+    "server": SNAPSERVER_HOST or "127.0.0.1",
+    "port": SNAPSERVER_PORT,
     "use_alsa": True,
     "pipewire_latency": "1024/48000",
     "latency_ms": 0,
     "volume": 1.0,
     "autostart": True,
     "extra": "",
+    # Snapserver's JSON-RPC port. Audio is 1704, control is 1705; they are
+    # separate listeners, so this is not derived from `port`.
+    "control_port": SNAPSERVER_CONTROL_PORT,
 }
+
+
+# Panel-wide settings, editable from the web and stored next to the players.
+# The Bluetooth marker lives here rather than in the code so it can be changed
+# or removed without a rebuild -- "(BT)" is only the starting value.
+DEFAULT_SETTINGS = {"bt_name_template": "{name} (BT)"}
+
+
+class SettingsError(ValueError):
+    status = 400
+
+
+def validate_settings(patch, current=None):
+    clean = dict(current or DEFAULT_SETTINGS)
+    for key, value in (patch or {}).items():
+        if key not in DEFAULT_SETTINGS:
+            raise SettingsError("unknown setting %r" % key)
+        clean[key] = value
+
+    template = str(clean["bt_name_template"]).strip()
+    if "{name}" not in template:
+        raise SettingsError("the template must contain {name}")
+    if len(template) > 80:
+        raise SettingsError("the template is too long")
+    # It has to still produce a legal player name once filled in.
+    sample = template.format(name="Speaker")
+    if not NAME_RE.fullmatch(sample):
+        raise SettingsError(
+            "the template produces an invalid name (%r) -- it must be 1-64 "
+            "printable characters" % sample
+        )
+    clean["bt_name_template"] = template
+    return clean
 
 
 class PlayerError(ValueError):
@@ -175,10 +236,9 @@ def validate(config, existing_names=()):
     clean.update({k: v for k, v in (config or {}).items() if k in DEFAULTS})
 
     clean["name"] = str(clean["name"]).strip()
-    if not NAME_RE.match(clean["name"]):
+    if not NAME_RE.fullmatch(clean["name"]):
         raise PlayerError(
-            "name must be 1-64 characters of letters, digits, space, dot, dash "
-            "or underscore"
+            "name must be 1-64 printable characters (no control characters)"
         )
     if clean["name"] in existing_names:
         raise PlayerError("a player named %r already exists" % clean["name"])
@@ -205,6 +265,13 @@ def validate(config, existing_names=()):
         raise PlayerError("port must be a number") from None
     if not 1 <= clean["port"] <= 65535:
         raise PlayerError("port must be between 1 and 65535")
+
+    try:
+        clean["control_port"] = int(clean["control_port"])
+    except (TypeError, ValueError):
+        raise PlayerError("control port must be a number") from None
+    if not 1 <= clean["control_port"] <= 65535:
+        raise PlayerError("control port must be between 1 and 65535")
 
     try:
         clean["latency_ms"] = int(clean["latency_ms"])
@@ -248,6 +315,7 @@ class Player:
         self._lock = threading.RLock()
 
         self.desired = False
+        self.named_on_server = False
         self.state = "stopped"
         self.detail = ""
         self.started_at = None
@@ -257,9 +325,14 @@ class Player:
 
     # ---- reporting ---------------------------------------------------------
 
+    @property
+    def client_id(self):
+        return snapctl.client_id_for(self.config["name"], self.config.get("instance", 1))
+
     def status(self):
         with self._lock:
             return {
+                "client_id": self.client_id,
                 **self.config,
                 "state": self.state,
                 "detail": self.detail,
@@ -526,6 +599,7 @@ class Supervisor:
         # Injected so players.py never imports the Bluetooth layer; keeps this
         # module testable with a plain lambda.
         self.connect_bluetooth = connect_bluetooth
+        self.settings = dict(DEFAULT_SETTINGS)
         self.load()
 
     # ---- persistence -------------------------------------------------------
@@ -536,6 +610,10 @@ class Supervisor:
                 stored = json.load(handle)
         except (OSError, ValueError):
             return
+        try:
+            self.settings = validate_settings(stored.get("settings") or {})
+        except SettingsError:
+            self.settings = dict(DEFAULT_SETTINGS)
         for entry in stored.get("players", []):
             try:
                 config = validate(entry)
@@ -548,7 +626,10 @@ class Supervisor:
 
     def save(self):
         with self._lock:
-            payload = {"players": [p.config for p in self._players.values()]}
+            payload = {
+                "settings": self.settings,
+                "players": [p.config for p in self._players.values()],
+            }
         try:
             os.makedirs(os.path.dirname(self.config_path) or ".", exist_ok=True)
             tmp = self.config_path + ".tmp"
@@ -557,6 +638,19 @@ class Supervisor:
             os.replace(tmp, self.config_path)  # atomic: never a half-written config
         except OSError:
             pass
+
+    def update_settings(self, patch):
+        with self._lock:
+            self.settings = validate_settings(patch, self.settings)
+        self.save()
+        return self.settings
+
+    def suggest_name(self, base, bluetooth):
+        """What the Add-player form should prefill for this output."""
+        base = (base or "").strip()
+        if not bluetooth or not base:
+            return base
+        return self.settings["bt_name_template"].format(name=base)
 
     # ---- CRUD --------------------------------------------------------------
 
@@ -567,18 +661,63 @@ class Supervisor:
             candidate += 1
         return candidate
 
-    def list(self):
+    def list(self, with_snapcast=True):
         sinks = {s["node"] for s in list_sinks()}
         with self._lock:
-            out = []
-            for player in self._players.values():
-                status = player.status()
-                status["node_present"] = (
-                    status["node"] in sinks if status["node"] else None
-                )
-                out.append(status)
+            players = list(self._players.values())
+
+        out = []
+        for player in players:
+            status = player.status()
+            status["node_present"] = (
+                status["node"] in sinks if status["node"] else None
+            )
+            status["snapcast"] = None
+            status["snapcast_error"] = None
+            out.append(status)
+
+        if with_snapcast:
+            self._attach_snapcast(players, out)
+
         out.sort(key=lambda p: p["name"].lower())
         return out
+
+    def _attach_snapcast(self, players, statuses):
+        """Fold in what the Snapserver knows: now playing, volume, capabilities.
+
+        One Server.GetStatus per distinct server covers every player, and the
+        result is briefly cached, so a 5s UI poll costs one short-lived socket
+        rather than one per player.
+        """
+        for player, status in zip(players, statuses):
+            host = player.config.get("server")
+            port = player.config.get("control_port", snapctl.DEFAULT_CONTROL_PORT)
+            if not host:
+                continue
+            try:
+                info = snapctl.describe(host, port, player.client_id)
+            except snapctl.SnapcastError as exc:
+                status["snapcast_error"] = str(exc)
+                continue
+            status["snapcast"] = info
+            if info is None:
+                continue
+            # snapclient's --hostID sets the id, not the display name, so
+            # Snapcast falls back to this container's hostname for every player
+            # in here. Name it once, the first time we see it connected.
+            if (
+                info["connected"]
+                and not player.named_on_server
+                and info["name"] != player.config["name"]
+            ):
+                try:
+                    snapctl.set_name(host, port, player.client_id, player.config["name"])
+                    player.named_on_server = True
+                    player.log("named this client %r on the snapserver"
+                               % player.config["name"])
+                    status["snapcast"]["name"] = player.config["name"]
+                except snapctl.SnapcastError as exc:
+                    player.log("could not set the snapserver name: %s" % exc)
 
     def get(self, player_id):
         with self._lock:
@@ -615,6 +754,7 @@ class Supervisor:
         player.stop()
         with self._lock:
             player.config = clean
+            player.named_on_server = False   # re-apply under the new name
         self.save()
         if was_running:
             player.start()

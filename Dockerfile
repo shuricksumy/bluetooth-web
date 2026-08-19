@@ -98,7 +98,7 @@ RUN set -eu; \
     snapclient --version
 
 WORKDIR /app
-COPY app.py btctl.py players.py healthcheck.py /app/
+COPY app.py btctl.py players.py snapctl.py healthcheck.py /app/
 COPY static/ /app/static/
 
 # /config holds players.json. Mount it to keep players across image updates.
@@ -108,7 +108,15 @@ RUN install -d /config
 # bind-mounts the host's socket at exactly this path. PIPEWIRE_RUNTIME_DIR and
 # PIPEWIRE_REMOTE point at the host's PipeWire socket, mounted at /tmp/pipewire-0
 # -- the same convention pipewire-snapclient uses.
-ENV DBUS_SYSTEM_BUS_ADDRESS="unix:path=/run/dbus/system_bus_socket" \
+# Snapserver defaults for newly created players. Audio and control are separate
+# listeners on the server (1704 / 1705), so the control port is set explicitly
+# rather than derived. SNAPSERVER_HOST empty means "the host you browsed the
+# panel on", which is right whenever the panel and the server share a box.
+ENV SNAPSERVER_HOST="" \
+    SNAPSERVER_PORT="1704" \
+    SNAPSERVER_CONTROL_PORT="1705" \
+    SNAPSERVER_WEB_PORT="1780" \
+    DBUS_SYSTEM_BUS_ADDRESS="unix:path=/run/dbus/system_bus_socket" \
     PIPEWIRE_RUNTIME_DIR="/tmp" \
     PIPEWIRE_REMOTE="pipewire-0" \
     CONFIG_DIR="/config" \

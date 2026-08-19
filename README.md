@@ -109,6 +109,12 @@ On **Ubuntu** you will also need `security_opt: [apparmor=unconfined]` — see
 | `PORT` | `8080` | Port inside the container. |
 | `BIND_HOST` | `0.0.0.0` | Listen address inside the container. |
 | `DBUS_SYSTEM_BUS_ADDRESS` | `unix:path=/run/dbus/system_bus_socket` | Where libdbus looks for the host bus. Change only if you mount the socket elsewhere. |
+| `SNAPSERVER_HOST` | _(empty)_ | Default Snapserver for new players. Empty means "whatever host you browsed the panel on". |
+| `SNAPSERVER_PORT` | `1704` | Default audio port. |
+| `SNAPSERVER_CONTROL_PORT` | `1705` | JSON-RPC port used for now-playing, transport and naming. A separate listener from the audio port, not derived from it. |
+| `SNAPSERVER_WEB_PORT` | `1780` | Snapweb, linked from each player row. |
+| `POLL_SECONDS` | `5` | How often the browser re-reads state. |
+| `CONFIG_DIR` | `/config` | Where `players.json` lives. |
 | `DEBUG` | `false` | `true` raises the log level to DEBUG. |
 | `BLUETOOTHCTL` | `bluetoothctl` | Binary to drive. Only useful for testing. |
 
@@ -221,7 +227,7 @@ Pick the device, and the form fills in the rest:
 | Field | Default | Why |
 | :-- | :-- | :-- |
 | Output | the paired device | Determines `PIPEWIRE_NODE`; Bluetooth devices are listed first |
-| Name | the device's name | `--hostID`, i.e. what Snapcast and Music Assistant show |
+| Name | the device's name, marked as Bluetooth | `--hostID`, i.e. what Snapcast and Music Assistant show. The marker comes from a template you edit under ⚙ — `{name} (BT)` by default, `{name}` to drop it |
 | Snapserver | the host you are browsing | Usually correct: the panel and the server are typically the same box |
 | Port | `1704` | Snapcast's stream port |
 | Latency (ms) | `0` | **Sync offset — see below** |
@@ -232,6 +238,26 @@ Starting a player **connects its Bluetooth device first** and waits up to 20 s f
 the sink to appear, because a `bluez_output` node only exists while the speaker is
 connected. If it never shows up the player sits in `waiting` and says so rather
 than thrashing.
+
+### Now playing and transport control
+
+Players show what is playing, pulled from the Snapserver's JSON-RPC port — title,
+artist, album art, plus volume and mute. Where the stream supports it you also get
+**play / pause / next / previous**.
+
+Those buttons are drawn from the stream's own `canControl` / `canPause` /
+`canGoNext` / `canGoPrevious` flags, which differ per stream and change at
+runtime: a Music Assistant stream typically reports all four, a plain pipe stream
+reports none and gets no buttons. Snapcast has no "stop" — pause is the stop.
+
+The panel also sets each client's **name** on the server. `snapclient --hostID`
+only sets the client *id*; the display name starts empty, so Snapcast and Music
+Assistant fall back to the hostname — which is this container's, identical for
+every player running in here. Without that call all your players show up under
+one meaningless name.
+
+For anything beyond a single player — groups, stream assignment, clients this
+panel did not create — each row links to **Snapweb** on the server itself.
 
 ### ⚠️ Bluetooth latency
 
@@ -275,6 +301,11 @@ rejected with `400 {"error": "invalid MAC address"}`.
 | `POST` | `/api/players/<id>/{start,stop,restart}` | — | Lifecycle. |
 | `GET` | `/api/players/<id>/logs` | — | Last 200 log lines. |
 | `GET` | `/api/sinks` | — | PipeWire sinks available right now. |
+| `POST` | `/api/players/<id>/control/{play,pause,playPause,next,previous}` | — | Transport, if the stream allows it. |
+| `POST` | `/api/players/<id>/volume` | `{"percent":50}` or `{"muted":true}` | Per-client volume. |
+| `GET`/`PATCH` | `/api/settings` | `{"bt_name_template":"{name} (BT)"}` | Defaults for new players. |
+| `GET` | `/api/snapcast/stale` | — | Clients the server remembers but nothing uses. |
+| `DELETE` | `/api/snapcast/client/<id>` | — | Forget one of those. |
 
 A successful response carries the refreshed table, so the UI never needs a second
 round trip:
@@ -338,6 +369,7 @@ docker build -t bluetooth-web .
 | :-- | :-- |
 | [`app.py`](app.py) | Flask routes, MAC validation, Basic Auth, the stale-cache fallback |
 | [`players.py`](players.py) | Supervised `snapclient` children: launch, backoff, logs, persistence |
+| [`snapctl.py`](snapctl.py) | Snapserver JSON-RPC: now playing, transport, volume, client naming |
 | [`btctl.py`](btctl.py) | The one long-lived `bluetoothctl` REPL, its lock, and all output parsing |
 | [`static/index.html`](static/index.html) | The entire frontend — vanilla JS, no build step |
 | [`healthcheck.py`](healthcheck.py) | Docker `HEALTHCHECK`; any HTTP answer counts as alive |

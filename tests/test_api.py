@@ -19,13 +19,17 @@ sys.path.insert(0, ROOT)
 
 def load_app(mode="ok", start_timeout=None, **env):
     """Import a fresh app bound to the mock in the requested scenario."""
-    for key in ("ADMIN_PASSWORD", "ADMIN_USER", "MOCK_MODE"):
+    for key in ("ADMIN_PASSWORD", "ADMIN_USER", "MOCK_MODE",
+                "SNAPSERVER_HOST", "SNAPSERVER_PORT", "SNAPSERVER_CONTROL_PORT",
+                "SNAPSERVER_WEB_PORT"):
         os.environ.pop(key, None)
     os.environ["MOCK_MODE"] = mode
     os.environ["BLUETOOTHCTL"] = "%s %s" % (sys.executable, MOCK)
     os.environ.update(env)
 
-    for name in ("app", "btctl"):
+    # players and snapctl read their defaults at import time, so they have to
+    # be reloaded too or env-driven settings silently keep the previous values.
+    for name in ("app", "btctl", "players", "snapctl"):
         sys.modules.pop(name, None)
     btctl = importlib.import_module("btctl")
     if start_timeout is not None:
@@ -575,7 +579,7 @@ def test_index_html_is_well_formed():
     # Every element the script reaches for by id must exist in the markup.
     for element_id in (
         "notes", "status", "live", "scan", "duration", "adapter",
-        "pairedRows", "pairedEmpty", "pairedCount",
+        "pairedRows", "pairedEmpty", "pairedCount", "fBtTemplate", "playerSettings",
         "foundRows", "foundEmpty", "foundCount", "showUnnamed",
     ):
         assert 'id="%s"' % element_id in page, element_id
@@ -691,3 +695,107 @@ def test_patch_updates_a_player(player_client):
 
 def test_sinks_endpoint_is_available(player_client):
     assert player_client.get("/api/sinks").get_json() == {"sinks": []}
+
+
+# ---- packaging --------------------------------------------------------------
+
+
+def test_dockerfile_copies_every_module_the_app_imports():
+    """A module missing from COPY crashes the image on boot, not in CI.
+
+    snapctl.py shipped exactly that way once: every test passed, the container
+    died with ModuleNotFoundError the moment it started.
+    """
+    dockerfile = open(os.path.join(ROOT, "Dockerfile")).read()
+    copied = set()
+    for line in dockerfile.splitlines():
+        if line.startswith("COPY") and "/app/" in line:
+            copied.update(w for w in line.split() if w.endswith(".py"))
+
+    modules = {
+        os.path.basename(p)
+        for p in os.listdir(ROOT)
+        if p.endswith(".py") and not p.startswith("test_")
+    }
+    assert modules <= copied, "not copied into the image: %s" % (modules - copied)
+
+
+def test_every_copied_module_actually_imports():
+    import importlib
+    import py_compile
+
+    for name in ("app", "btctl", "players", "snapctl"):
+        assert importlib.import_module(name)
+    # healthcheck.py is a script: importing it would run the probe and exit.
+    py_compile.compile(os.path.join(ROOT, "healthcheck.py"), doraise=True)
+
+
+# ---- snapserver defaults from the environment -------------------------------
+
+
+def test_snapserver_defaults_come_from_env(monkeypatch):
+    app_module = load_app(
+        "ok", SNAPSERVER_HOST="10.0.0.9", SNAPSERVER_PORT="1799",
+        SNAPSERVER_CONTROL_PORT="1800",
+    )
+    cfg = app_module.app.test_client().get("/api/config").get_json()
+    assert cfg["snapserver"]["host"] == "10.0.0.9"
+    assert cfg["snapserver"]["port"] == 1799
+    assert cfg["snapserver"]["control_port"] == 1800
+
+    players_mod = sys.modules["players"]
+    assert players_mod.DEFAULTS["server"] == "10.0.0.9"
+    assert players_mod.DEFAULTS["port"] == 1799
+    assert players_mod.DEFAULTS["control_port"] == 1800
+
+
+def test_a_player_created_with_no_server_uses_those_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
+    app_module = load_app(
+        "ok", SNAPSERVER_HOST="10.0.0.9", SNAPSERVER_CONTROL_PORT="1800",
+        CONFIG_DIR=str(tmp_path),
+    )
+    players_mod = sys.modules["players"]
+    monkeypatch.setattr(players_mod, "list_sinks", list)
+    app_module.supervisor.config_path = str(tmp_path / "p.json")
+
+    created = app_module.app.test_client().post("/api/players", json={
+        "name": "Defaults", "mac": "5C:01:3B:63:E7:BA", "autostart": False,
+    }).get_json()["player"]
+    assert created["server"] == "10.0.0.9"
+    assert created["control_port"] == 1800
+    app_module.supervisor.stop_all()
+
+
+def test_garbage_env_falls_back_instead_of_crashing():
+    app_module = load_app("ok", SNAPSERVER_PORT="not-a-number")
+    assert app_module.app.test_client().get("/api/config").get_json()["snapserver"]["port"] == 1704
+
+
+def test_snapweb_port_is_configurable():
+    app_module = load_app("ok", SNAPSERVER_WEB_PORT="1999")
+    cfg = app_module.app.test_client().get("/api/config").get_json()
+    assert cfg["snapserver"]["web_port"] == 1999
+
+
+def test_snapweb_port_defaults_to_1780():
+    app_module = load_app("ok")
+    cfg = app_module.app.test_client().get("/api/config").get_json()
+    assert cfg["snapserver"]["web_port"] == 1780
+
+
+def test_settings_round_trip_over_http(player_client):
+    body = player_client.get("/api/settings").get_json()
+    assert body["settings"]["bt_name_template"] == "{name} (BT)"
+
+    res = player_client.patch("/api/settings", json={"bt_name_template": "{name} ~BT"})
+    assert res.status_code == 200
+    assert res.get_json()["settings"]["bt_name_template"] == "{name} ~BT"
+    assert player_client.get("/api/settings").get_json()["settings"][
+        "bt_name_template"] == "{name} ~BT"
+
+
+def test_bad_settings_over_http_are_400(player_client):
+    res = player_client.patch("/api/settings", json={"bt_name_template": "nope"})
+    assert res.status_code == 400
+    assert "{name}" in res.get_json()["error"]
