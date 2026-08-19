@@ -1,0 +1,43 @@
+name: GHCR package cleanup
+
+# build.yml never produces a per-push sha tag -- only `latest` and `main`, both
+# repointed rather than appended on every push. That orphans the digest each one
+# used to point at, so those untagged multi-arch layers pile up. This sweeps them,
+# and is ready for a semver release tag if one is ever cut (metadata-action
+# already has type=semver configured).
+#
+# Same shape as the sibling pipewire-snapclient repo's copy. Run it once with
+# dry-run: true and read the log before trusting it with real deletions.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'List what would be deleted without deleting it'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 5 1 * *'
+
+permissions:
+  packages: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old ghcr.io package versions
+        uses: dataaxiom/ghcr-cleanup-action@v1.2.2
+        with:
+          owner: shuricksumy
+          # Published as ghcr.io/shuricksumy/bluetooth-web-snapclient -- build.yml's
+          # metadata images field is repository_owner-scoped, not repo-name-scoped.
+          package: "bluetooth-web-snapclient"
+          # Keep `latest`, `main` and any future semver tag; delete the rest plus
+          # orphaned untagged layers. Flat alternation, no nested quantifiers --
+          # a nested-quantifier pattern trips this action's own ReDoS heuristic.
+          delete-tags: ".*"
+          exclude-tags: '^latest$|^main$|^[0-9]+\.[0-9]+$|^[0-9]+\.[0-9]+\.[0-9]+$'
+          use-regex: true
+          delete-untagged: true
+          dry-run: ${{ inputs.dry_run == true }}
+          log-level: info

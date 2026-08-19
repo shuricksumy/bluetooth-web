@@ -582,6 +582,7 @@ def test_index_html_is_well_formed():
         "pairedRows", "pairedEmpty", "pairedCount", "fBtTemplate", "playerSettings",
         "pageTitle", "themeToggle", "snapwebLink",
         "fSnapHost", "fSnapPort", "fSnapControl", "fSnapWeb",
+        "dialogDelete", "addPlayer", "snapwebLink",
         "foundRows", "foundEmpty", "foundCount", "showUnnamed",
     ):
         assert 'id="%s"' % element_id in page, element_id

@@ -43,7 +43,7 @@ ARG REFRESH_WEEK=0
 
 LABEL org.opencontainers.image.title="bluetooth-web" \
       org.opencontainers.image.description="Web panel for pairing Bluetooth devices and running Snapcast players against them" \
-      org.opencontainers.image.source="https://github.com/shuricksumy/bluetooth-web" \
+      org.opencontainers.image.source="https://github.com/shuricksumy/bluetooth-web-snapclient" \
       org.opencontainers.image.licenses="MIT"
 
 # Distro packages only -- no pip, no wheels to audit.

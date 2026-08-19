@@ -2,7 +2,7 @@
 # Published image. Open http://<host>:8088 once it is up.
 services:
   bluetooth-web:
-    image: ghcr.io/shuricksumy/bluetooth-web:latest
+    image: ghcr.io/shuricksumy/bluetooth-web-snapclient:latest
     container_name: bluetooth-web
 
     ports:

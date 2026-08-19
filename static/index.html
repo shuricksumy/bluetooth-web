@@ -46,10 +46,14 @@
     gap: .75rem; align-items: center; margin-bottom: 1rem;
   }
   h1 { font-size: 1.25rem; margin: 0; white-space: nowrap; }
-  .head-actions {
-    display: flex; gap: .4rem; align-items: center;
-    justify-content: flex-end; flex-wrap: wrap;
+  .head-actions { display: flex; gap: .4rem; align-items: center; justify-content: flex-end; }
+  /* Tab-specific controls live in the tab, not the header: keeping them up top
+     made the header reflow (and wrap) every time the active tab changed. */
+  .toolbar {
+    display: flex; gap: .5rem; align-items: center; flex-wrap: wrap;
+    margin-bottom: .25rem;
   }
+  .toolbar .spacer { flex: 1 1 auto; }
   @media (max-width: 900px) {
     header { grid-template-columns: 1fr; justify-items: start; }
     .head-actions { justify-content: flex-start; }
@@ -61,13 +65,21 @@
   h2 .count { color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: 0; }
   .card {
     background: var(--card); border: 1px solid var(--line);
-    border-radius: 10px; overflow: hidden; box-shadow: var(--shadow);
+    border-radius: 10px; box-shadow: var(--shadow);
+    /* Was overflow:hidden, which silently clipped the last action button off
+       the right edge instead of letting the row scroll. */
+    overflow-x: auto;
   }
+  .card > table { min-width: 44rem; }
   table { width: 100%; border-collapse: collapse; }
   th, td { padding: .6rem .75rem; text-align: left; border-bottom: 1px solid var(--line); vertical-align: middle; }
   th { font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
   tr:last-child td { border-bottom: none; }
   td.mac { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; color: var(--muted); white-space: nowrap; }
+  .sink {
+    font-size: .72rem; color: var(--muted); max-width: 15rem;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
   td.actions { text-align: right; white-space: nowrap; }
   td.actions .grp { display: inline-flex; gap: .28rem; align-items: center; }
   td.actions .grp a { display: inline-flex; }
@@ -101,6 +113,11 @@
   nav { display: flex; gap: .3rem; }
   nav button { margin: 0; }
   nav button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  /* The generic hover rule is `button:hover:not(:disabled)` -- two pseudo-classes,
+     so specificity (0,2,1), which outranks `nav button.active` at (0,1,2). Without
+     this the active tab's label turned accent-on-accent and disappeared the moment
+     you pointed at it. */
+  nav button.active:hover:not(:disabled) { color: #fff; border-color: var(--accent); }
   .state { font-size: .72rem; font-weight: 600; padding: .14rem .5rem; border-radius: 999px; }
   .state-cell { white-space: nowrap; }
   .state-meta { font-size: .74rem; color: var(--muted); white-space: nowrap; }
@@ -123,7 +140,8 @@
     border: 1px solid var(--line); background: var(--bg); color: var(--fg); width: 100%;
   }
   .field .hint2 { grid-column: 2; font-size: .74rem; color: var(--muted); margin-top: -.3rem; }
-  .dlg-actions { display: flex; justify-content: flex-end; gap: .4rem; margin-top: .9rem; }
+  .dlg-actions { display: flex; align-items: center; gap: .4rem; margin-top: .9rem; }
+  .dlg-actions .spacer { flex: 1 1 auto; }
   .np { display: flex; align-items: center; gap: .55rem; }
   .np img {
     width: 38px; height: 38px; border-radius: 5px; object-fit: cover;
@@ -149,30 +167,11 @@
 <main>
   <header>
     <h1 id="pageTitle">Player Panel</h1>
-
     <nav>
       <button id="tabPlayers" class="active">Players</button>
       <button id="tabDevices">Devices</button>
     </nav>
-
     <div class="head-actions">
-      <label class="muted devices-only" hidden>adapter
-        <select id="adapter"><option>…</option></select>
-      </label>
-      <label class="muted devices-only" hidden>for
-        <select id="duration">
-          <option value="5">5s</option>
-          <option value="10" selected>10s</option>
-          <option value="20">20s</option>
-          <option value="30">30s</option>
-        </select>
-      </label>
-      <button id="scan" class="primary devices-only" hidden>Scan for new devices</button>
-      <a id="snapwebLink" class="players-only" href="#" target="_blank" rel="noopener">
-        <button type="button" title="open Snapweb on the snapserver">Snapweb</button>
-      </a>
-      <button id="playerSettings" class="players-only" title="settings">⚙</button>
-      <button id="addPlayer" class="primary players-only">Add player</button>
       <button id="themeToggle" title="theme">🌗</button>
     </div>
   </header>
@@ -180,6 +179,21 @@
   <div id="notes"></div>
 
   <section id="viewDevices" hidden>
+  <div class="toolbar">
+    <label class="muted">adapter
+      <select id="adapter"><option>…</option></select>
+    </label>
+    <label class="muted">scan for
+      <select id="duration">
+        <option value="5">5s</option>
+        <option value="10" selected>10s</option>
+        <option value="20">20s</option>
+        <option value="30">30s</option>
+      </select>
+    </label>
+    <button id="scan" class="primary">Scan for new devices</button>
+  </div>
+
   <h2>Paired <span class="count" id="pairedCount"></span></h2>
   <div class="card">
     <table>
@@ -205,6 +219,15 @@
   </section>
 
   <section id="viewPlayers">
+    <div class="toolbar">
+      <a id="snapwebLink" href="#" target="_blank" rel="noopener">
+        <button type="button" title="open Snapweb on the snapserver">Snapweb</button>
+      </a>
+      <button id="playerSettings" title="settings">⚙</button>
+      <span class="spacer"></span>
+      <button id="addPlayer" class="primary">Add player</button>
+    </div>
+
     <h2>Snapcast players <span class="count" id="playerCount"></span></h2>
     <div class="card">
       <table>
@@ -278,6 +301,8 @@
 
       <div id="dialogError" class="note err" style="display:none"></div>
       <div class="dlg-actions">
+        <button type="button" id="dialogDelete" class="danger" hidden>Delete player</button>
+        <span class="spacer"></span>
         <button type="button" id="dialogCancel">Cancel</button>
         <button type="submit" class="primary" id="dialogSave">Save</button>
       </div>
@@ -574,7 +599,7 @@
 
       tr.innerHTML =
         `<td>${esc(p.name)}${p.mac ? ` <span class="badge on">BT</span>` : ""}` +
-          `<div class="muted" style="font-size:.72rem">${sink}</div></td>` +
+          `<div class="sink" title="${esc(p.node || "default sink")}">${sink}</div></td>` +
         `<td>${nowPlaying(p)}</td>` +
         `<td class="state-cell"><span class="state ${esc(p.state)}">${esc(p.state)}</span>${meta}` +
           `${detail}` +
@@ -586,7 +611,6 @@
           `<button data-do="logs">Logs</button>` +
           snapwebLink(p) +
           `<button data-do="edit">Edit</button>` +
-          `<button data-do="delete" class="danger">Delete</button>` +
         `</span></td>`;
 
       tr.querySelectorAll("button[data-do]").forEach((b) =>
@@ -776,6 +800,7 @@
       select.appendChild(el);
     }
 
+    $("dialogDelete").hidden = !player;
     if (player) {
       select.value = player.mac ? "bt:" + player.mac : "sink:" + player.node;
       $("fName").value = player.name;
@@ -912,8 +937,6 @@
     $("viewPlayers").hidden = !players;
     $("tabDevices").classList.toggle("active", !players);
     $("tabPlayers").classList.toggle("active", players);
-    document.querySelectorAll(".devices-only").forEach((e) => (e.hidden = players));
-    document.querySelectorAll(".players-only").forEach((e) => (e.hidden = !players));
     if (players) refreshPlayers();
   }
 
@@ -950,6 +973,18 @@
     applySource(sourceOptions().find((o) => o.value === $("fSource").value)));
   $("playerForm").addEventListener("submit", savePlayer);
   $("dialogCancel").addEventListener("click", () => { $("playerDialog").close(); editing = null; });
+  $("dialogDelete").addEventListener("click", async () => {
+    const player = lastPlayers.find((p) => p.id === editing);
+    if (!player) return;
+    if (!confirm(`Delete player ${player.name}? This stops it and forgets its settings.`)) return;
+    $("playerDialog").close();
+    editing = null;
+    setBusy(true, `deleting ${player.name}…`);
+    const data = await call(`/api/players/${encodeURIComponent(player.id)}`, { method: "DELETE" });
+    setNotes(data, data.ok ? `deleted ${player.name}` : null);
+    if (data.players) renderPlayers(data.players);
+    setBusy(false, "");
+  });
   $("logClose").addEventListener("click", () => $("logDialog").close());
 
   scanBtn.addEventListener("click", scan);
