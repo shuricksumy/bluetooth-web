@@ -156,8 +156,10 @@ def test_multiple_players_run_concurrently(supervisor):
     b.start()
     assert wait_for(lambda: a.state == "running" and b.state == "running")
 
-    assert "PIPEWIRE_NODE=bluez_output.F8_5C_7D_75_D6_06.1" in "\n".join(a.logs)
-    assert "PIPEWIRE_NODE=bluez_output.20_18_12_00_07_C4.1" in "\n".join(b.logs)
+    assert wait_for(
+        lambda: "PIPEWIRE_NODE=bluez_output.F8_5C_7D_75_D6_06.1" in "\n".join(a.logs))
+    assert wait_for(
+        lambda: "PIPEWIRE_NODE=bluez_output.20_18_12_00_07_C4.1" in "\n".join(b.logs))
     assert a._proc.pid != b._proc.pid
 
     a.stop()
@@ -262,7 +264,10 @@ def test_update_rebinds_a_running_player(supervisor):
     supervisor.update(player.id, {"mac": "20:18:12:00:07:C4", "node": ""})
     assert wait_for(lambda: player.state == "running", timeout=10)
     assert player.config["node"] == "bluez_output.20_18_12_00_07_C4.1"
-    assert "PIPEWIRE_NODE=bluez_output.20_18_12_00_07_C4.1" in "\n".join(player.logs)
+    assert wait_for(
+        lambda: "PIPEWIRE_NODE=bluez_output.20_18_12_00_07_C4.1" in "\n".join(player.logs),
+        timeout=10,
+    )
     player.stop()
 
 
