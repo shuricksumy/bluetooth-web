@@ -41,6 +41,16 @@ class SnapcastError(RuntimeError):
 _cache = {"key": None, "at": 0.0, "value": None}
 _cache_lock = threading.Lock()
 
+# The last stream each client was on that could actually be controlled.
+#
+# Music Assistant detaches a client's group from its MA stream when you pause,
+# parking it on "default" -- which reports canControl=False and carries no
+# metadata. Read naively that looks like "nothing to control here": the transport
+# buttons vanish and there is no way to resume from this panel. The MA stream is
+# still there, still controllable, still holding the paused track, so remember it
+# and keep driving that. Verified against a live Music Assistant snapserver.
+_last_controllable = {}
+
 
 def client_id_for(name, instance):
     """The client id snapclient will register with.
@@ -111,6 +121,10 @@ def invalidate():
         _cache.update(key=None, at=0.0, value=None)
 
 
+def forget(client_id):
+    _last_controllable.pop(client_id, None)
+
+
 def _find(status, client_id):
     for group in status.get("groups", []):
         for client in group.get("clients", []):
@@ -136,6 +150,19 @@ def describe(host, port, client_id, use_cache=True):
 
     stream = _stream(status, group.get("stream_id")) or {}
     props = stream.get("properties") or {}
+
+    attached = True
+    if props.get("canControl"):
+        _last_controllable[client_id] = stream.get("id")
+    else:
+        # Fall back to the stream this client last played from, as long as the
+        # server still has it. That is the paused case.
+        remembered = _stream(status, _last_controllable.get(client_id))
+        if remembered and (remembered.get("properties") or {}).get("canControl"):
+            stream = remembered
+            props = stream.get("properties") or {}
+            attached = False
+
     meta = props.get("metadata") or {}
     volume = (client.get("config") or {}).get("volume") or {}
     artists = meta.get("artist") or []
@@ -154,6 +181,9 @@ def describe(host, port, client_id, use_cache=True):
         "group_muted": bool(group.get("muted")),
         "stream_id": stream.get("id"),
         "stream_status": stream.get("status"),
+        # False when the group has been parked elsewhere (paused) but we are
+        # still reporting -- and controlling -- the stream it belongs to.
+        "attached": attached,
         "playback_status": props.get("playbackStatus"),
         "can_control": bool(props.get("canControl")),
         "can_pause": bool(props.get("canPause")),

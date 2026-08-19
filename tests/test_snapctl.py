@@ -15,10 +15,12 @@ from fake_snapserver import FakeSnapserver  # noqa: E402
 @pytest.fixture
 def server():
     snapctl.invalidate()
+    snapctl._last_controllable.clear()
     fake = FakeSnapserver()
     yield fake
     fake.close()
     snapctl.invalidate()
+    snapctl._last_controllable.clear()
 
 
 # ---- client id derivation ---------------------------------------------------
@@ -142,3 +144,67 @@ def test_stale_clients_and_deletion(server):
     snapctl.delete_client("127.0.0.1", server.port, "Ghost")
     assert "Ghost" not in server.clients
     assert snapctl.stale_clients("127.0.0.1", server.port) == []
+
+
+# ---- pause: Music Assistant parks the group on "default" --------------------
+
+
+def test_a_paused_client_keeps_its_stream_and_stays_controllable(server):
+    """The exact live failure: pause detaches the group, controls vanished.
+
+    Music Assistant moves the client's group to the uncontrollable "default"
+    stream when you pause. Reading the group's *current* stream then reports
+    canControl=False with no metadata, the transport disappears, and there is no
+    way to resume. The MA stream is still present and still controllable.
+    """
+    before = snapctl.describe("127.0.0.1", server.port, "Kitchen#2", use_cache=False)
+    assert before["stream_id"] == "ma-kitchen"
+    assert before["attached"] is True
+
+    server.groups["g2"] = "default"          # what pausing does
+
+    after = snapctl.describe("127.0.0.1", server.port, "Kitchen#2", use_cache=False)
+    assert after["stream_id"] == "ma-kitchen", "should keep driving the MA stream"
+    assert after["attached"] is False, "but report that the group is parked"
+    assert after["can_control"] is True
+    assert after["title"] == "Baby Don't Hurt Me", "the paused track stays visible"
+
+
+def test_resuming_a_paused_client_targets_the_remembered_stream(server):
+    snapctl.describe("127.0.0.1", server.port, "Kitchen#2", use_cache=False)
+    server.groups["g2"] = "default"
+
+    info = snapctl.describe("127.0.0.1", server.port, "Kitchen#2", use_cache=False)
+    snapctl.control("127.0.0.1", server.port, info["stream_id"], "play")
+
+    sent = [p for m, p in server.calls if m == "Stream.Control"]
+    assert sent[-1]["id"] == "ma-kitchen"
+    assert server.streams["ma-kitchen"]["playbackStatus"] == "playing"
+
+
+def test_a_client_that_never_had_a_controllable_stream_is_unchanged(server):
+    """No memory to fall back on: report the truth, offer no buttons."""
+    info = snapctl.describe("127.0.0.1", server.port, "Ghost", use_cache=False)
+    assert info["stream_id"] == "default"
+    assert info["can_control"] is False
+    assert info["attached"] is True
+
+
+def test_the_remembered_stream_is_dropped_if_the_server_forgets_it(server):
+    snapctl.describe("127.0.0.1", server.port, "Kitchen#2", use_cache=False)
+    server.groups["g2"] = "default"
+    del server.streams["ma-kitchen"]         # MA tore the stream down
+
+    info = snapctl.describe("127.0.0.1", server.port, "Kitchen#2", use_cache=False)
+    assert info["stream_id"] == "default"
+    assert info["can_control"] is False
+    snapctl.forget("Kitchen#2")
+
+
+def test_moving_to_another_controllable_stream_updates_the_memory(server):
+    snapctl.describe("127.0.0.1", server.port, "Kitchen#2", use_cache=False)
+    server.groups["g2"] = "ma-dx5"
+
+    info = snapctl.describe("127.0.0.1", server.port, "Kitchen#2", use_cache=False)
+    assert info["stream_id"] == "ma-dx5"
+    assert info["attached"] is True

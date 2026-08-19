@@ -70,14 +70,13 @@
        the right edge instead of letting the row scroll. */
     overflow-x: auto;
   }
-  .card > table { min-width: 44rem; }
   table { width: 100%; border-collapse: collapse; }
   th, td { padding: .6rem .75rem; text-align: left; border-bottom: 1px solid var(--line); vertical-align: middle; }
   th { font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
   tr:last-child td { border-bottom: none; }
   td.mac { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; color: var(--muted); white-space: nowrap; }
   .sink {
-    font-size: .72rem; color: var(--muted); max-width: 15rem;
+    font-size: .72rem; color: var(--muted); max-width: 12rem;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   td.actions { text-align: right; white-space: nowrap; }
@@ -95,6 +94,11 @@
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.08); }
   button.danger:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+  /* A destructive action should read as destructive before you hover it. */
+  button.danger-solid { background: var(--danger); border-color: var(--danger); color: #fff; }
+  button.danger-solid:hover:not(:disabled) {
+    background: var(--danger); border-color: var(--danger); color: #fff; filter: brightness(1.08);
+  }
   .badge {
     display: inline-block; font-size: .68rem; font-weight: 600; padding: .12rem .45rem;
     border-radius: 999px; margin-right: .22rem; background: var(--line); color: var(--muted);
@@ -148,7 +152,7 @@
     flex: 0 0 auto; background: var(--line);
   }
   /* min-width:0 is what lets the ellipsis actually kick in inside a flex row. */
-  .np-text { min-width: 0; flex: 1 1 auto; max-width: 17rem; }
+  .np-text { min-width: 0; flex: 1 1 auto; max-width: 15rem; }
   .np-title { font-size: .82rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .np-artist { font-size: .74rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .transport { display: flex; gap: .2rem; flex: 0 0 auto; white-space: nowrap; }
@@ -191,6 +195,7 @@
         <option value="30">30s</option>
       </select>
     </label>
+    <span class="spacer"></span>
     <button id="scan" class="primary">Scan for new devices</button>
   </div>
 
@@ -301,7 +306,7 @@
 
       <div id="dialogError" class="note err" style="display:none"></div>
       <div class="dlg-actions">
-        <button type="button" id="dialogDelete" class="danger" hidden>Delete player</button>
+        <button type="button" id="dialogDelete" class="danger-solid" hidden>Delete player</button>
         <span class="spacer"></span>
         <button type="button" id="dialogCancel">Cancel</button>
         <button type="submit" class="primary" id="dialogSave">Save</button>
@@ -637,16 +642,19 @@
     // The cells are narrow and the text is ellipsised, so the full strings go
     // in title= -- hovering a truncated track name shows all of it.
     const full = [s.title, s.artist, s.album].filter(Boolean).join(" — ");
+    // Paused: Music Assistant parks the group on "default", so keep showing the
+    // stream the player belongs to and label it rather than going blank.
+    const paused = s.attached === false;
     const title = s.title
       ? `<div class="np-title" title="${esc(full)}">${esc(s.title)}</div>
-         <div class="np-artist" title="${esc(full)}">${esc(s.artist || s.album || "")}</div>`
+         <div class="np-artist" title="${esc(full)}">${paused ? "paused · " : ""}${esc(s.artist || s.album || "")}</div>`
       : `<div class="np-artist" title="${esc(s.stream_id || "")}">${esc(s.stream_id || "no stream")} — ${esc(s.stream_status || "idle")}</div>`;
 
     // Only offer what this stream says it supports; the flags differ per stream
     // and change at runtime. A plain pipe stream gets no buttons at all.
     let controls = "";
     if (s.can_control) {
-      const playing = s.playback_status === "playing";
+      const playing = s.playback_status === "playing" && s.attached !== false;
       const b = (cmd, glyph, on, title) =>
         `<button data-cmd="${cmd}" ${on ? "" : "disabled"} title="${title}">${glyph}</button>`;
       controls =
