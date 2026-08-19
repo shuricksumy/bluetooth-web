@@ -23,42 +23,56 @@
     margin: 0; padding: 1.5rem 1rem; background: var(--bg); color: var(--fg);
     font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
-  main { max-width: 62rem; margin: 0 auto; }
-  header { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; margin-bottom: 1rem; }
+  main { max-width: 68rem; margin: 0 auto; }
+  header { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-bottom: 1rem; }
   h1 { font-size: 1.3rem; margin: 0; flex: 1 1 auto; }
+  h2 {
+    font-size: .78rem; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--muted); margin: 1.4rem 0 .5rem;
+  }
+  h2 .count { color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: 0; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
   table { width: 100%; border-collapse: collapse; }
   th, td { padding: .6rem .75rem; text-align: left; border-bottom: 1px solid var(--line); vertical-align: middle; }
-  th { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  th { font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
   tr:last-child td { border-bottom: none; }
-  td.mac { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82rem; color: var(--muted); white-space: nowrap; }
+  td.mac { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; color: var(--muted); white-space: nowrap; }
   td.actions { text-align: right; white-space: nowrap; }
-  button {
-    font: inherit; padding: .35rem .7rem; margin-left: .3rem; border-radius: 6px;
-    border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer;
+  button, select {
+    font: inherit; border-radius: 6px; border: 1px solid var(--line);
+    background: var(--card); color: var(--fg);
   }
+  button { padding: .32rem .65rem; margin-left: .28rem; cursor: pointer; }
+  select { padding: .3rem; }
   button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-  button:disabled { opacity: .5; cursor: default; }
+  button:disabled { opacity: .45; cursor: default; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.08); }
   button.danger:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
   .badge {
-    display: inline-block; font-size: .7rem; font-weight: 600; padding: .12rem .45rem;
-    border-radius: 999px; margin-right: .25rem; background: var(--line); color: var(--muted);
+    display: inline-block; font-size: .68rem; font-weight: 600; padding: .12rem .45rem;
+    border-radius: 999px; margin-right: .22rem; background: var(--line); color: var(--muted);
   }
   .badge.on { background: var(--okbg); color: var(--ok); }
-  .note { padding: .6rem .8rem; border-radius: 8px; margin-bottom: .75rem; font-size: .88rem; }
+  .note { padding: .6rem .8rem; border-radius: 8px; margin-bottom: .6rem; font-size: .88rem; }
   .note.err { background: var(--dangerbg); color: var(--danger); }
   .note.warn { background: var(--warnbg); color: var(--warn); }
+  .note.ok { background: var(--okbg); color: var(--ok); }
   .muted { color: var(--muted); font-size: .85rem; }
-  select { font: inherit; padding: .3rem; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--fg); }
-  .empty { padding: 1.5rem; text-align: center; color: var(--muted); }
+  .empty { padding: 1.2rem; text-align: center; color: var(--muted); font-size: .9rem; }
+  .hint { font-size: .78rem; color: var(--muted); margin: .3rem 0 0; }
+  .dot { display: inline-block; width: .5rem; height: .5rem; border-radius: 50%; background: var(--line); margin-right: .4rem; }
+  .dot.live { background: var(--ok); }
+  .adapter { font-size: .78rem; color: var(--muted); }
 </style>
 
 <main>
   <header>
     <h1>Bluetooth Panel</h1>
-    <label class="muted">scan
+    <label class="muted">adapter
+      <select id="adapter"><option>…</option></select>
+    </label>
+    <label class="muted">for
       <select id="duration">
         <option value="5">5s</option>
         <option value="10" selected>10s</option>
@@ -66,36 +80,51 @@
         <option value="30">30s</option>
       </select>
     </label>
-    <button id="scan" class="primary">Scan</button>
+    <button id="scan" class="primary">Scan for new devices</button>
   </header>
 
   <div id="notes"></div>
 
+  <h2>Paired <span class="count" id="pairedCount"></span></h2>
   <div class="card">
     <table>
-      <thead>
-        <tr><th>Device</th><th>Address</th><th>State</th><th></th></tr>
-      </thead>
-      <tbody id="rows"></tbody>
+      <thead><tr><th>Device</th><th>Address</th><th>State</th><th></th></tr></thead>
+      <tbody id="pairedRows"></tbody>
     </table>
-    <div id="empty" class="empty">Loading&hellip;</div>
+    <div id="pairedEmpty" class="empty">Loading…</div>
   </div>
 
-  <p class="muted" id="status"></p>
+  <h2>Discovered <span class="count" id="foundCount"></span>
+    <label class="muted" style="float:right;font-weight:400;text-transform:none;letter-spacing:0">
+      <input type="checkbox" id="showUnnamed"> show unnamed
+    </label>
+  </h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>Device</th><th>Address</th><th>State</th><th></th></tr></thead>
+      <tbody id="foundRows"></tbody>
+    </table>
+    <div id="foundEmpty" class="empty">Nothing unpaired in range. Put the device in pairing mode, then Scan.</div>
+  </div>
+
+  <p class="hint">
+    <span class="dot" id="live"></span><span id="status">idle</span>
+    &nbsp;·&nbsp; The device list refreshes on its own and never touches the radio.
+    Scanning does — it can make connected speakers stutter, so it only runs when you ask.
+  </p>
 </main>
 
 <script>
 (() => {
   "use strict";
-  const rows = document.getElementById("rows");
-  const notes = document.getElementById("notes");
-  const empty = document.getElementById("empty");
-  const status = document.getElementById("status");
-  const scanBtn = document.getElementById("scan");
-  const durationSel = document.getElementById("duration");
+  const $ = (id) => document.getElementById(id);
+  const notes = $("notes"), statusEl = $("status"), live = $("live");
+  const scanBtn = $("scan"), durationSel = $("duration"), adapterSel = $("adapter");
 
-  let busy = false;      // an action or scan is in flight: pause polling
+  let busy = false;         // an action or scan owns the UI: pause polling
+  let pollMs = 5000;
   let timer = null;
+  let lastAction = "";
 
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -107,92 +136,192 @@
     notes.appendChild(div);
   }
 
-  function setNotes(data, err) {
+  function setNotes(data, extra) {
     notes.replaceChildren();
-    if (err) note(err, "err");
     if (data && data.error) note(data.error, "err");
     (data && data.warnings || []).forEach((w) => note(w, "warn"));
+    if (data && data.steps) {
+      const failed = data.steps.filter((s) => !s.ok);
+      if (failed.length) failed.forEach((s) => note(`${s.step}: ${s.output}`, "err"));
+      else if (extra) note(extra + " — " + data.steps.map((s) => s.step).join(" → "), "ok");
+    } else if (extra && data && data.ok) {
+      note(extra, "ok");
+    }
   }
 
-  function render(devices) {
-    rows.replaceChildren();
-    empty.style.display = devices.length ? "none" : "block";
-    if (!devices.length) empty.textContent = "No devices known yet — hit Scan.";
+  // --- rendering -------------------------------------------------------------
+
+  function actionsFor(d) {
+    const acts = [];
+    if (!d.paired) {
+      acts.push(`<button data-act="pair" class="primary">Pair &amp; Connect</button>`);
+      return acts;
+    }
+    if (d.connected) {
+      acts.push(`<button data-act="reconnect">Reconnect</button>`);
+      acts.push(`<button data-act="disconnect">Disconnect</button>`);
+    } else {
+      acts.push(`<button data-act="connect" class="primary">Connect</button>`);
+    }
+    if (!d.trusted) acts.push(`<button data-act="trust">Trust</button>`);
+    acts.push(`<button data-act="repair" class="danger">Re-pair</button>`);
+    acts.push(`<button data-act="remove" class="danger">Forget</button>`);
+    return acts;
+  }
+
+  function renderInto(tbody, emptyEl, countEl, devices, emptyText) {
+    tbody.replaceChildren();
+    countEl.textContent = devices.length ? `(${devices.length})` : "";
+    emptyEl.style.display = devices.length ? "none" : "block";
+    if (!devices.length) emptyEl.textContent = emptyText;
 
     for (const d of devices) {
+      const badge = (label, on) => `<span class="badge${on ? " on" : ""}">${label}</span>`;
       const tr = document.createElement("tr");
-      const badge = (label, on) =>
-        `<span class="badge${on ? " on" : ""}">${label}</span>`;
-
-      // Contextual actions: only offer what makes sense for this device's state.
-      const acts = [];
-      if (!d.paired) acts.push(`<button data-act="pair" class="primary">Pair &amp; Connect</button>`);
-      if (d.connected) acts.push(`<button data-act="disconnect">Disconnect</button>`);
-      else if (d.paired) acts.push(`<button data-act="connect" class="primary">Connect</button>`);
-      if (d.paired && !d.trusted) acts.push(`<button data-act="trust">Trust</button>`);
-      if (d.paired) acts.push(`<button data-act="remove" class="danger">Remove</button>`);
-
+      const label = d.named === false
+        ? `<span class="muted">unnamed device</span>`
+        : esc(d.name);
       tr.innerHTML =
-        `<td>${esc(d.name)}</td>` +
+        `<td>${label}</td>` +
         `<td class="mac">${esc(d.mac)}</td>` +
         `<td>${badge("Paired", d.paired)}${badge("Connected", d.connected)}${badge("Trusted", d.trusted)}</td>` +
-        `<td class="actions">${acts.join("")}</td>`;
+        `<td class="actions">${actionsFor(d).join("")}</td>`;
+      tr.querySelectorAll("button").forEach((b) =>
+        b.addEventListener("click", () => act(b.dataset.act, d)));
+      tbody.appendChild(tr);
+    }
+  }
 
-      tr.querySelectorAll("button").forEach((b) => {
-        b.addEventListener("click", () => act(b.dataset.act, d));
-      });
-      rows.appendChild(tr);
+  let lastDevices = [];
+
+  function render(devices) {
+    lastDevices = devices;
+    const showUnnamed = $("showUnnamed").checked;
+    // Anything advertising no name is almost always a randomised BLE address
+    // from a passing phone or watch, not something you want to pair with.
+    const found = devices.filter((d) => !d.paired && (showUnnamed || d.named !== false));
+    const hidden = devices.filter((d) => !d.paired && d.named === false).length;
+
+    renderInto($("pairedRows"), $("pairedEmpty"), $("pairedCount"),
+      devices.filter((d) => d.paired),
+      "No paired devices yet. Put one in pairing mode and hit Scan.");
+    renderInto($("foundRows"), $("foundEmpty"), $("foundCount"), found,
+      hidden && !showUnnamed
+        ? `${hidden} unnamed device(s) hidden — tick "show unnamed" to see them.`
+        : "Nothing unpaired in range. Put the device in pairing mode, then Scan.");
+  }
+
+  function renderAdapters(adapters) {
+    if (!adapters || !adapters.length) {
+      adapterSel.innerHTML = `<option>no controller</option>`;
+      adapterSel.disabled = true;
+      return;
+    }
+    adapterSel.disabled = adapters.length < 2;
+    adapterSel.replaceChildren();
+    for (const a of adapters) {
+      const opt = document.createElement("option");
+      const bits = [a.hci || a.mac];
+      if (a.bus) bits.push(a.bus);
+      if (a.powered === false) bits.push("off");
+      opt.value = a.mac;
+      opt.textContent = `${a.name} — ${bits.join(" · ")}`;
+      opt.selected = a.selected;
+      adapterSel.appendChild(opt);
     }
   }
 
   function setBusy(on, label) {
     busy = on;
     scanBtn.disabled = on;
-    document.querySelectorAll("#rows button").forEach((b) => (b.disabled = on));
-    status.textContent = label || "";
+    adapterSel.disabled = on || adapterSel.options.length < 2;
+    document.querySelectorAll("tbody button").forEach((b) => (b.disabled = on));
+    live.classList.toggle("live", !on);
+    statusEl.textContent = label || (on ? "working…" : "idle");
   }
 
   async function call(url, options) {
-    const res = await fetch(url, options);
     let data = {};
-    try { data = await res.json(); } catch (_) { /* non-JSON body */ }
-    if (!res.ok && !data.error) data.error = `HTTP ${res.status}`;
+    try {
+      const res = await fetch(url, options);
+      try { data = await res.json(); } catch (_) { /* non-JSON */ }
+      if (!res.ok && !data.error) data.error = `HTTP ${res.status}`;
+    } catch (err) {
+      data.error = "cannot reach the panel: " + err.message;
+    }
     return data;
   }
 
+  // --- operations ------------------------------------------------------------
+
   async function refresh() {
-    if (busy) return;
+    if (busy || document.hidden) return;
     const data = await call("/api/devices");
-    setNotes(data);
     if (data.devices) render(data.devices);
-    if (data.stale) status.textContent = "showing last known list";
-    else if (!busy) status.textContent = "";
+    // Keep a success message from the last action visible instead of stomping it.
+    if (data.error || (data.warnings || []).length) setNotes(data);
+    statusEl.textContent = data.stale ? "showing last known list" : (lastAction || "idle");
   }
 
   async function act(kind, device) {
-    setBusy(true, `${kind}… ${device.name}`);
-    const data = await call(`/api/${kind}/${encodeURIComponent(device.mac)}`, { method: "POST" });
-    setNotes(data);
+    if (kind === "repair" && !confirm(
+        `Re-pair ${device.name}?\n\nThis forgets the pairing first, so the device ` +
+        `must be in pairing mode or it will not come back.`)) return;
+    if (kind === "remove" && !confirm(`Forget ${device.name}?`)) return;
+
+    setBusy(true, `${kind} ${device.name}…`);
+    const data = await call(`/api/${kind}/${encodeURIComponent(device.mac)}`,
+      { method: "POST" });
+    setNotes(data, data.ok ? `${kind}: ${device.name}` : null);
     if (data.devices) render(data.devices);
-    setBusy(false, data.ok ? `${kind} ok` : "");
-    refresh();
+    lastAction = data.ok ? `${kind} ok` : `${kind} failed`;
+    setBusy(false, lastAction);
+    loadAdapters();
   }
 
   async function scan() {
     const seconds = Number(durationSel.value);
-    setBusy(true, `scanning for ${seconds}s…`);
+    setBusy(true, `scanning ${seconds}s — connected audio may stutter…`);
     const data = await call("/api/scan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ duration: seconds }),
     });
-    setNotes(data);
+    setNotes(data, data.ok ? `scan finished (${seconds}s)` : null);
     if (data.devices) render(data.devices);
-    setBusy(false, "");
+    lastAction = "scan done";
+    setBusy(false, lastAction);
   }
 
+  async function loadAdapters() {
+    const data = await call("/api/adapters");
+    renderAdapters(data.adapters);
+  }
+
+  async function selectAdapter(mac) {
+    setBusy(true, "switching adapter…");
+    const data = await call(`/api/adapter/${encodeURIComponent(mac)}`, { method: "POST" });
+    setNotes(data, data.ok ? "adapter switched" : null);
+    if (data.adapters) renderAdapters(data.adapters);
+    if (data.devices) render(data.devices);
+    lastAction = "idle";
+    setBusy(false, lastAction);
+  }
+
+  // --- wiring ----------------------------------------------------------------
+
   scanBtn.addEventListener("click", scan);
-  refresh();
-  timer = setInterval(refresh, 5000);
+  $("showUnnamed").addEventListener("change", () => render(lastDevices));
+  adapterSel.addEventListener("change", (e) => selectAdapter(e.target.value));
+  // Stop polling a tab nobody is looking at; resume immediately on return.
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+
+  (async () => {
+    const cfg = await call("/api/config");
+    if (cfg.poll_seconds) pollMs = cfg.poll_seconds * 1000;
+    await loadAdapters();
+    await refresh();
+    timer = setInterval(refresh, pollMs);
+  })();
 })();
 </script>

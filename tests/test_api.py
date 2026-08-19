@@ -4,6 +4,7 @@ Nothing here needs a Bluetooth adapter, a D-Bus bus or root, so it runs in CI.
 """
 import importlib
 import os
+import re
 import stat
 import sys
 import threading
@@ -50,6 +51,7 @@ def test_devices_listed_with_state(client):
     assert by_mac["AA:BB:CC:DD:EE:01"] == {
         "mac": "AA:BB:CC:DD:EE:01",
         "name": "Topping DX5",
+        "named": True,
         "paired": True,
         "connected": True,
         "trusted": True,
@@ -343,3 +345,250 @@ def test_polling_is_not_blocked_by_a_running_scan(client):
 
     thread.join()
     assert done["status"] == 200
+
+
+# ---- adapters (controllers) -------------------------------------------------
+
+
+def test_adapters_are_listed_with_the_selected_one_marked(client):
+    body = client.get("/api/adapters").get_json()
+    by_mac = {a["mac"]: a for a in body["adapters"]}
+    assert set(by_mac) == {"C8:8A:D8:05:65:0B", "00:1A:7D:DA:71:13"}
+    assert by_mac["C8:8A:D8:05:65:0B"]["selected"] is True
+    assert by_mac["00:1A:7D:DA:71:13"]["selected"] is False
+    assert by_mac["C8:8A:D8:05:65:0B"]["powered"] is True
+    assert by_mac["00:1A:7D:DA:71:13"]["powered"] is False
+
+
+def test_selecting_an_adapter_switches_and_powers_it(client):
+    body = client.post("/api/adapter/00:1A:7D:DA:71:13").get_json()
+    assert body["ok"] is True
+    by_mac = {a["mac"]: a for a in body["adapters"]}
+    assert by_mac["00:1A:7D:DA:71:13"]["selected"] is True
+    assert by_mac["C8:8A:D8:05:65:0B"]["selected"] is False
+    # select_adapter() powers the newly chosen controller on.
+    assert client.get("/api/adapters").get_json()["adapters"]
+
+    powered = {a["mac"]: a["powered"] for a in
+               client.get("/api/adapters").get_json()["adapters"]}
+    assert powered["00:1A:7D:DA:71:13"] is True
+
+
+def test_selecting_an_unknown_adapter_fails_cleanly(client):
+    res = client.post("/api/adapter/11:22:33:44:55:66")
+    assert res.status_code == 502
+    assert "11:22:33:44:55:66" in res.get_json()["error"]
+
+
+@pytest.mark.parametrize("payload", ["not-a-mac", "C8:8A:D8:05:65:0B%0Apower%20off"])
+def test_adapter_route_validates_the_mac(client, payload):
+    assert client.post("/api/adapter/" + payload).status_code == 400
+
+
+def test_adapter_hardware_reads_sysfs(tmp_path, monkeypatch):
+    """The hciN / bus label comes from the host's /sys, shared with the container.
+
+    The MAC -> hciN mapping comes from BlueZ's object manager, because current
+    kernels no longer publish /sys/class/bluetooth/hciN/address.
+    """
+    import btctl
+
+    root = tmp_path / "bluetooth"
+    (root / "hci0").mkdir(parents=True)
+    (root / "hci0" / "address").write_text("C8:8A:D8:05:65:0B\n")
+
+    # The bus is read as basename(realpath(device/subsystem)), mirroring
+    # /sys/bus/usb on a real host.
+    (tmp_path / "bus" / "usb").mkdir(parents=True)
+    usb = tmp_path / "usbdev"
+    usb.mkdir()
+    (usb / "subsystem").symlink_to(tmp_path / "bus" / "usb")
+    (usb / "product").write_text("Wireless-AC 9260 Bluetooth\n")
+    (usb / "manufacturer").write_text("Intel Corp.\n")
+    (root / "hci0" / "device").symlink_to(usb)
+    # A connection node, which must be ignored.
+    (root / "hci0:7").mkdir()
+
+    monkeypatch.setattr(btctl, "SYS_BLUETOOTH", str(root))
+    monkeypatch.setattr(btctl, "adapter_paths", lambda: {"C8:8A:D8:05:65:0B": "hci0"})
+    hardware = btctl.adapter_hardware()
+    assert list(hardware) == ["C8:8A:D8:05:65:0B"]
+    entry = hardware["C8:8A:D8:05:65:0B"]
+    assert entry["hci"] == "hci0"
+    assert entry["bus"] == "USB"
+    assert "Intel Corp." in entry["product"]
+
+
+def test_adapter_hardware_survives_a_missing_sysfs(monkeypatch):
+    import btctl
+
+    monkeypatch.setattr(btctl, "SYS_BLUETOOTH", "/nonexistent/bluetooth")
+    monkeypatch.setattr(btctl, "adapter_paths", dict)
+    assert btctl.adapter_hardware() == {}
+    assert btctl.adapter_hardware(["C8:8A:D8:05:65:0B"]) == {}
+
+
+def test_adapter_paths_parses_the_object_manager(monkeypatch):
+    """One adapter object plus a device under it; only the adapter counts."""
+    import btctl
+
+    reply = (
+        'dict entry( object path "/org/bluez/hci0" array [ dict entry( '
+        'string "org.bluez.Adapter1" array [ dict entry( string "Address" '
+        'variant string "C8:8A:D8:05:65:0B" ) ] ) ] ) '
+        'dict entry( object path "/org/bluez/hci0/dev_00_02_5B_00_FF_04" array [ '
+        'dict entry( string "org.bluez.Device1" array [ dict entry( '
+        'string "Address" variant string "00:02:5B:00:FF:04" ) ] ) ] )'
+    )
+    monkeypatch.setattr(btctl, "_dbus_send", lambda *a, **k: (True, reply))
+    assert btctl.adapter_paths() == {"C8:8A:D8:05:65:0B": "hci0"}
+
+
+def test_adapter_paths_is_empty_when_the_bus_is_unreachable(monkeypatch):
+    import btctl
+
+    monkeypatch.setattr(btctl, "_dbus_send", lambda *a, **k: (False, "no bus"))
+    assert btctl.adapter_paths() == {}
+
+
+def test_single_adapter_falls_back_to_the_only_hci(tmp_path, monkeypatch):
+    """No object manager, one controller, one hciN -- the pairing is unambiguous."""
+    import btctl
+
+    root = tmp_path / "bluetooth"
+    (root / "hci0" / "device").mkdir(parents=True)
+    (tmp_path / "bus" / "usb").mkdir(parents=True)
+    (root / "hci0" / "device" / "subsystem").symlink_to(tmp_path / "bus" / "usb")
+    (root / "hci0:7").mkdir()
+
+    monkeypatch.setattr(btctl, "SYS_BLUETOOTH", str(root))
+    monkeypatch.setattr(btctl, "adapter_paths", dict)
+    hardware = btctl.adapter_hardware(["C8:8A:D8:05:65:0B"])
+    assert hardware["C8:8A:D8:05:65:0B"]["hci"] == "hci0"
+    assert hardware["C8:8A:D8:05:65:0B"]["bus"] == "USB"
+
+
+# ---- reconnect / re-pair ----------------------------------------------------
+
+
+def test_reconnect_cycles_the_link(client):
+    body = client.post("/api/reconnect/AA:BB:CC:DD:EE:01").get_json()
+    assert body["ok"] is True
+    assert [s["step"] for s in body["steps"]] == ["disconnect", "connect"]
+    device = next(d for d in body["devices"] if d["mac"] == "AA:BB:CC:DD:EE:01")
+    assert device["connected"] is True
+
+
+def test_reconnect_tolerates_a_device_that_was_not_connected(client):
+    client.post("/api/disconnect/AA:BB:CC:DD:EE:01")
+    body = client.post("/api/reconnect/AA:BB:CC:DD:EE:01").get_json()
+    assert body["ok"] is True
+    assert next(d for d in body["devices"]
+                if d["mac"] == "AA:BB:CC:DD:EE:01")["connected"] is True
+
+
+def test_repair_forgets_then_pairs_again(client):
+    body = client.post("/api/repair/AA:BB:CC:DD:EE:02").get_json()
+    assert body["ok"] is True
+    # `remove` deletes BlueZ's device object, so re-pairing has to rediscover
+    # the device before it can pair with it again.
+    assert [s["step"] for s in body["steps"]] == [
+        "forget", "rediscover", "pair", "trust", "connect"]
+    device = next(d for d in body["devices"] if d["mac"] == "AA:BB:CC:DD:EE:02")
+    assert (device["paired"], device["trusted"], device["connected"]) == (True, True, True)
+
+
+def test_repair_on_a_device_out_of_range_says_so_and_stops(monkeypatch):
+    """The footgun case: forgotten, then never seen again."""
+    app_module = load_app("ok", MOCK_OUT_OF_RANGE="AA:BB:CC:DD:EE:01")
+    monkeypatch.setattr(sys.modules["btctl"], "REDISCOVER_TIMEOUT", 2.0)
+    client = app_module.app.test_client()
+    res = client.post("/api/repair/AA:BB:CC:DD:EE:01")
+    body = res.get_json()
+    assert res.status_code == 502
+    assert body["ok"] is False
+    steps = {s["step"]: s for s in body["steps"]}
+    # It must report that the forget already happened -- that is the part the
+    # user needs to know about.
+    assert steps["forget"]["ok"] is True
+    assert steps["rediscover"]["ok"] is False
+    assert "pairing mode" in body["error"]
+    assert "pair" not in steps
+
+
+@pytest.mark.parametrize("route", ["reconnect", "repair"])
+def test_compound_routes_validate_the_mac(client, route):
+    assert client.post("/api/%s/AA:BB:CC:DD:EE:01%%0Ascan%%20on" % route).status_code == 400
+
+
+# ---- config -----------------------------------------------------------------
+
+
+def test_config_exposes_the_poll_interval(client):
+    body = client.get("/api/config").get_json()
+    assert body["poll_seconds"] > 0
+    assert body["auth"] is False
+
+
+# ---- prompt shapes ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("prompt", ["modern", "legacy"])
+def test_both_bluez_prompt_styles_are_understood(prompt):
+    """BlueZ 5.8x uses "[DX5]> ", 5.7x used "[bluetooth]# ". Both must work.
+
+    Getting this wrong hangs the panel on modern distros while a one-shot
+    `bluetoothctl show` still succeeds -- a genuinely confusing failure, and one
+    a mock that only ever emitted "#" happily hid.
+    """
+    app_module = load_app("ok", MOCK_PROMPT=prompt)
+    body = app_module.app.test_client().get("/api/devices").get_json()
+    assert len(body["devices"]) == 3
+    assert body.get("error") is None
+
+
+def test_unnamed_devices_are_flagged(client):
+    """BlueZ names a nameless device after its address; the UI hides those."""
+    import btctl
+
+    assert btctl._has_name("JBL Flip 6", "AA:BB:CC:DD:EE:02") is True
+    assert btctl._has_name("48-B4-23-F5-28-85", "48:B4:23:F5:28:85") is False
+    assert btctl._has_name("48:B4:23:F5:28:85", "48:B4:23:F5:28:85") is False
+    assert all(d["named"] for d in client.get("/api/devices").get_json()["devices"])
+
+
+# ---- the static page --------------------------------------------------------
+
+
+def test_index_html_is_well_formed():
+    """An unterminated <script> is silently discarded by the browser.
+
+    Dropping the closing tag once produced a page that loaded, rendered its
+    chrome, and then simply never called the API -- no console error, nothing.
+    Cheap to assert, miserable to debug.
+    """
+    page = open(os.path.join(ROOT, "static", "index.html")).read()
+    assert page.count("<script>") == page.count("</script>") == 1
+    assert page.count("<style>") == page.count("</style>") == 1
+    # Every element the script reaches for by id must exist in the markup.
+    for element_id in (
+        "notes", "status", "live", "scan", "duration", "adapter",
+        "pairedRows", "pairedEmpty", "pairedCount",
+        "foundRows", "foundEmpty", "foundCount", "showUnnamed",
+    ):
+        assert 'id="%s"' % element_id in page, element_id
+
+
+def test_index_html_only_calls_routes_that_exist():
+    """Catch a typo'd endpoint in the frontend before a human does."""
+    page = open(os.path.join(ROOT, "static", "index.html")).read()
+    referenced = set(re.findall(r'"/api/([a-z]+)', page))
+    referenced |= set(re.findall(r'`/api/\$\{[^}]+\}/', page)) and set()
+    import app as app_module
+
+    served = {
+        str(rule).split("/")[2]
+        for rule in app_module.app.url_map.iter_rules()
+        if str(rule).startswith("/api/")
+    }
+    assert referenced <= served, referenced - served

@@ -33,6 +33,11 @@ MAC_RE = re.compile(r"[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}")
 MAX_SCAN_SECONDS = 60
 DEFAULT_SCAN_SECONDS = 10
 
+# How often the browser re-reads the device table. This costs four D-Bus
+# property reads and touches the radio not at all, so it is safe to leave
+# running next to connected audio -- unlike a scan. Tunable anyway.
+POLL_SECONDS = max(1.0, float(os.environ.get("POLL_SECONDS", "5")))
+
 # How long /api/devices waits for the REPL lock before giving up and serving the
 # last known table. A scan holds the lock for its full duration; without this the
 # poller and the Docker healthcheck would both stall behind it.
@@ -138,6 +143,43 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+@app.get("/api/config")
+def api_config():
+    return jsonify(poll_seconds=POLL_SECONDS, auth=bool(ADMIN_PASSWORD))
+
+
+@app.get("/api/adapters")
+def api_adapters():
+    """The controllers on this host (hci0, hci1, ...) and which one is active."""
+    try:
+        adapters = btctl.list_adapters(lock_timeout=DEVICES_LOCK_TIMEOUT)
+    except BluetoothBusy:
+        return jsonify(adapters=[], busy=True)
+    except BluetoothctlError as exc:
+        return jsonify(adapters=[], error=str(exc)), exc.status
+    return jsonify(adapters=adapters)
+
+
+@app.post("/api/adapter/<mac>")
+def api_select_adapter(mac):
+    """Switch which controller every other route acts on."""
+    mac, bad = mac_or_400(mac)
+    if bad:
+        return bad
+    try:
+        adapters = btctl.select_adapter(mac)
+    except BluetoothctlError as exc:
+        return jsonify(ok=False, error=str(exc), action="adapter"), exc.status
+    try:
+        devices = btctl.list_devices(lock_timeout=DEVICES_LOCK_TIMEOUT)
+        cache_devices(devices)
+    except BluetoothctlError:
+        devices, _ = cached_devices()
+    return jsonify(
+        devices_payload(devices, ok=True, action="adapter", adapters=adapters)
+    )
+
+
 @app.get("/api/devices")
 def api_devices():
     try:
@@ -178,21 +220,41 @@ def api_scan():
 @app.post("/api/pair/<mac>")
 def api_pair(mac):
     """Quick pair: pair, then trust, then connect."""
+    return multi_step(mac, btctl.quick_pair, "pair")
+
+
+def multi_step(mac, func, label):
+    """Shared plumbing for the compound actions (pair / reconnect / repair)."""
     mac, bad = mac_or_400(mac)
     if bad:
         return bad
     try:
-        steps = btctl.quick_pair(mac)
+        steps = func(mac)
     except StepFailure as exc:
-        return jsonify(ok=False, error=str(exc), steps=exc.steps, action="pair"), exc.status
+        return (
+            jsonify(ok=False, error=str(exc), steps=exc.steps, action=label),
+            exc.status,
+        )
     except BluetoothctlError as exc:
-        return jsonify(ok=False, error=str(exc), action="pair"), exc.status
+        return jsonify(ok=False, error=str(exc), action=label), exc.status
     try:
         devices = btctl.list_devices(lock_timeout=DEVICES_LOCK_TIMEOUT)
         cache_devices(devices)
     except BluetoothctlError:
         devices, _ = cached_devices()
-    return jsonify(devices_payload(devices, ok=True, action="pair", steps=steps))
+    return jsonify(devices_payload(devices, ok=True, action=label, steps=steps))
+
+
+@app.post("/api/reconnect/<mac>")
+def api_reconnect(mac):
+    """Disconnect then connect -- the fix for a stale or silent link."""
+    return multi_step(mac, btctl.reconnect, "reconnect")
+
+
+@app.post("/api/repair/<mac>")
+def api_repair(mac):
+    """Forget the pairing and pair again. The device must be in pairing mode."""
+    return multi_step(mac, btctl.repair, "repair")
 
 
 @app.post("/api/connect/<mac>")

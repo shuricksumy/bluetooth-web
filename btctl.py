@@ -24,11 +24,18 @@ import time
 
 import pexpect
 
-# bluetoothctl's prompt, e.g. "[bluetooth]# " or "[Speaker]# ", wrapped in the
-# colour escapes bt_shell emits when stdout is a tty (pexpect always gives it
-# one). The optional escape run sits between "]" and "#" because BlueZ closes
-# the colour right after the bracket: "\x1b[0;94m[bluetooth]\x1b[0m# ".
-PROMPT = re.compile(r"(?:\x1b\[[0-9;]*m)*\[[^\]\n]*\](?:\x1b\[[0-9;]*m)*#\s")
+# bluetoothctl's prompt, wrapped in the colour escapes bt_shell emits when
+# stdout is a tty (pexpect always gives it one).
+#
+# BOTH terminators matter. BlueZ <= 5.7x ends the prompt with "#":
+#     \x1b[0;94m[bluetooth]\x1b[0m#
+# BlueZ 5.8x switched to "> " and renames the prompt after whatever is currently
+# selected, so on a box with a connected DX5 it reads:
+#     \x1b[0;94m[bluetoothctl]> \x1b[0m   ... then ...   \x1b[0;94m[DX5]> \x1b[0m
+# Matching only "#" makes the whole panel hang on any modern distro while the
+# one-shot `bluetoothctl show` keeps working, which is a thoroughly confusing
+# way to fail.
+PROMPT = re.compile(r"(?:\x1b\[[0-9;]*m)*\[[^\]\n]*\](?:\x1b\[[0-9;]*m)*[#>]\s")
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 
@@ -37,6 +44,19 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 # ..." notifications that bluetoothctl interleaves are not mistaken for listing
 # output.
 DEVICE_LINE = re.compile(r"^Device\s+((?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s*(.*)$")
+
+# Lines of a `list` listing: "Controller C8:8A:D8:05:65:0B DOCK [default]".
+CONTROLLER_LINE = re.compile(
+    r"^Controller\s+((?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s*(.*)$"
+)
+
+# sysfs is the only place that knows how an adapter is attached. Containers
+# share the host's /sys, so this works without mounting anything extra.
+SYS_BLUETOOTH = "/sys/class/bluetooth"
+HCI_NAME = re.compile(r"^hci\d+$")
+
+BUS_LABELS = {"usb": "USB", "pci": "PCI", "serial": "UART", "platform": "platform",
+              "sdio": "SDIO", "bluetooth": "virtual"}
 
 # Substrings that mean "bluetoothctl accepted the command but BlueZ refused it".
 FAILURE_MARKERS = (
@@ -51,6 +71,8 @@ START_TIMEOUT = 15.0
 # Pairing waits on the peer device (and possibly a human pressing a button).
 PAIR_TIMEOUT = 60.0
 CONNECT_TIMEOUT = 45.0
+# How long re-pairing scans for the device it just forgot.
+REDISCOVER_TIMEOUT = 20.0
 
 
 class BluetoothctlError(RuntimeError):
@@ -71,6 +93,85 @@ class BluetoothBusy(BluetoothctlError):
     status = 409
 
 
+def _read_text(path):
+    try:
+        with open(path) as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+# BlueZ names each adapter object /org/bluez/hciN and carries its Address, which
+# is the only reliable way to tie a controller MAC to an hciN: current kernels no
+# longer expose /sys/class/bluetooth/hciN/address.
+ADAPTER_OBJECT = re.compile(r"^/org/bluez/(hci\d+)$")
+ADAPTER_ADDRESS = re.compile(
+    r'string "Address" variant string "((?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})"'
+)
+
+
+def adapter_paths():
+    """Map controller MAC -> hciN, straight out of BlueZ's object manager."""
+    ok, out = _dbus_send(
+        "--dest=org.bluez", "/", "org.freedesktop.DBus.ObjectManager.GetManagedObjects",
+        timeout=15,
+    )
+    if not ok:
+        return {}
+
+    found = {}
+    # _dbus_send has already collapsed the runs of whitespace dbus-send emits.
+    for chunk in out.split('object path "')[1:]:
+        path = chunk.split('"', 1)[0]
+        match = ADAPTER_OBJECT.match(path)
+        if not match:
+            continue  # a device under the adapter, not the adapter itself
+        address = ADAPTER_ADDRESS.search(chunk)
+        if address:
+            found[address.group(1).upper()] = match.group(1)
+    return found
+
+
+def adapter_hardware(macs=None):
+    """Map controller MAC -> how it is attached (hciN, bus, product name).
+
+    Purely cosmetic: it is what lets the UI say "hci0 · USB · Intel" so you can
+    tell an internal radio from a dongle. Everything degrades to blank strings if
+    sysfs or the object manager is unavailable.
+    """
+    paths = adapter_paths()
+    if not paths and macs and len(macs) == 1:
+        # One controller and one hciN: the pairing is unambiguous even without
+        # the object manager.
+        try:
+            names = [n for n in sorted(os.listdir(SYS_BLUETOOTH)) if HCI_NAME.match(n)]
+        except OSError:
+            names = []
+        if len(names) == 1:
+            paths = {macs[0].upper(): names[0]}
+
+    found = {}
+    for mac, hci in paths.items():
+        device = os.path.join(SYS_BLUETOOTH, hci, "device")
+        bus = os.path.basename(os.path.realpath(os.path.join(device, "subsystem")))
+        # For USB the product/manufacturer strings sit on the parent device, not
+        # on the interface that hciN/device points at.
+        product = (
+            _read_text(os.path.join(device, "product"))
+            or _read_text(os.path.join(device, os.pardir, "product"))
+        )
+        vendor = (
+            _read_text(os.path.join(device, "manufacturer"))
+            or _read_text(os.path.join(device, os.pardir, "manufacturer"))
+        )
+        found[mac] = {
+            "hci": hci,
+            "bus": BUS_LABELS.get(bus, bus if bus and bus != "/" else ""),
+            "product": " ".join(x for x in (vendor, product) if x),
+        }
+    return found
+
+
 def bus_socket_path(address=None):
     """The filesystem path out of a DBUS_SYSTEM_BUS_ADDRESS value."""
     address = address or os.environ.get(
@@ -83,15 +184,33 @@ def bus_socket_path(address=None):
     return None
 
 
+def _dbus_send(*args, timeout=10):
+    """Run dbus-send; return (ok, combined output). ok is None if unavailable."""
+    try:
+        proc = subprocess.run(
+            ["dbus-send", "--system", "--print-reply"] + list(args),
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, ""
+    text = " ".join(((proc.stderr or "") + " " + (proc.stdout or "")).split())
+    return proc.returncode == 0, text
+
+
 def diagnose_dbus():
     """Explain why the system bus is unusable, or return None if it is fine.
 
     bluetoothctl 5.82 does not check the result of dbus_bus_get(): when the bus
     refuses it, the NULL connection trips an assertion and the process dumps
-    core, so all the wrapper sees is an immediate EOF. That looked exactly like
-    a missing socket and the old message said so -- which is wrong and costly
-    when the socket is mounted correctly and the host is simply denying the
-    connection. Ask D-Bus directly instead of guessing.
+    core, so all the wrapper sees is an immediate EOF. That looks exactly like a
+    missing socket. Ask D-Bus directly rather than guessing.
+
+    The two probes are chosen to be ones the *default* D-Bus policy permits.
+    org.freedesktop.DBus.Peer.Ping is not: system.conf denies method calls by
+    default and only punches holes for the DBus, Introspectable, Properties and
+    Containers1 interfaces on the bus destination, so pinging Peer is refused on
+    a perfectly healthy host -- which an earlier version of this function
+    mistook for a real fault.
     """
     path = bus_socket_path()
     if path and not os.path.exists(path):
@@ -100,44 +219,52 @@ def diagnose_dbus():
             "host's system bus with `-v %s:%s`" % (path, path, path)
         )
 
-    try:
-        probe = subprocess.run(
-            [
-                "dbus-send", "--system", "--print-reply",
-                "--dest=org.freedesktop.DBus", "/",
-                "org.freedesktop.DBus.Peer.Ping",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
+    # Probe 1: can we register on the bus at all? This is what AppArmor blocks.
+    ok, error = _dbus_send(
+        "--dest=org.freedesktop.DBus", "/org/freedesktop/DBus",
+        "org.freedesktop.DBus.GetId",
+    )
+    if ok is None:
         return None  # no dbus-send to ask; fall back to the generic message
+    if not ok:
+        if "AppArmor" in error:
+            return (
+                "the host's AppArmor policy is blocking this container from "
+                "registering on the system bus (the D-Bus \"Hello\" was denied). "
+                "The socket is mounted correctly -- this is host policy, not a "
+                "mount problem. Docker confines containers with the "
+                "`docker-default` profile, which grants no D-Bus rules. Add "
+                "`security_opt: [\"apparmor=unconfined\"]` to this service, or "
+                "install an AppArmor profile that permits dbus. See the README."
+            )
+        return "the system D-Bus refused this container: %s" % error[:300]
 
-    if probe.returncode == 0:
+    # Probe 2: is bluetoothd actually there, and may we talk to it?
+    ok, error = _dbus_send(
+        "--dest=org.bluez", "/", "org.freedesktop.DBus.Introspectable.Introspect"
+    )
+    if ok:
         return None
-
-    error = " ".join(((probe.stderr or "") + " " + (probe.stdout or "")).split())
-    if "AppArmor" in error:
+    if "ServiceUnknown" in error or "not provided by any .service" in error:
         return (
-            "the host's AppArmor policy is blocking this container from registering "
-            "on the system bus (the D-Bus \"Hello\" was denied). The socket is "
-            "mounted correctly -- this is a host policy, not a mount problem. "
-            "Docker confines containers with the `docker-default` profile, which "
-            "grants no D-Bus rules, and Ubuntu's kernel enforces D-Bus mediation. "
-            "Add `security_opt: [\"apparmor=unconfined\"]` to this service, or "
-            "install an AppArmor profile that permits dbus. See the README."
+            "the system bus is reachable but nothing owns org.bluez -- bluetoothd "
+            "is not running on the host (`systemctl status bluetooth`)"
         )
-    if "Failed to connect" in error or "No such file" in error:
+    if "AccessDenied" in error or "Rejected send message" in error:
         return (
-            "cannot reach the system D-Bus at %s -- check the socket bind mount. "
-            "(%s)" % (path, error[:200])
+            "the host's D-Bus policy denies this container access to org.bluez. "
+            "BlueZ usually grants that to root or to a `bluetooth`/`lp` group; "
+            "check /etc/dbus-1/system.d/bluetooth.conf on the host. (%s)"
+            % error[:200]
         )
-    return "the system D-Bus refused this container: %s" % error[:300]
+    return "cannot reach org.bluez over the system bus: %s" % error[:300]
 
 
 def strip_ansi(text):
-    return ANSI.sub("", text or "").replace("\r", "").replace("\x1b", "")
+    cleaned = ANSI.sub("", text or "")
+    for junk in ("\r", "\x1b", "\x08"):
+        cleaned = cleaned.replace(junk, "")
+    return cleaned
 
 
 class Bluetoothctl:
@@ -352,10 +479,16 @@ class Bluetoothctl:
 
             devices = []
             for mac in sorted(set(names) | set(known) | set(connected)):
+                name = names.get(mac) or mac
                 devices.append(
                     {
                         "mac": mac,
-                        "name": names.get(mac) or mac,
+                        "name": name,
+                        # BlueZ falls back to the address with dashes when a
+                        # device advertises no name. A busy room is mostly those
+                        # -- randomised BLE addresses from phones and watches --
+                        # so the UI needs to be able to hide them.
+                        "named": _has_name(name, mac),
                         "paired": mac in paired,
                         "connected": mac in connected,
                         "trusted": mac in trusted,
@@ -367,6 +500,74 @@ class Bluetoothctl:
                 key=lambda d: (not d["connected"], not d["paired"], d["name"].lower())
             )
             return devices
+
+    # ---- adapters (controllers) --------------------------------------------
+
+    def list_adapters(self, lock_timeout=-1):
+        """Every controller bluetoothd knows about, plus how it is attached.
+
+        `devices` and every action are scoped to the selected controller, so on
+        a box with both an internal adapter and a USB dongle this is what tells
+        you which radio you are actually driving.
+        """
+        with self._locked(lock_timeout):
+            out = self._send("list")
+
+            rows = []
+            for line in out.splitlines():
+                match = CONTROLLER_LINE.match(line.strip())
+                if match:
+                    rows.append((match.group(1).upper(), match.group(2).strip()))
+            hardware = adapter_hardware([mac for mac, _ in rows])
+
+            adapters = []
+            for mac, rest in rows:
+                selected = rest.endswith("[default]")
+                if selected:
+                    rest = rest[: -len("[default]")].strip()
+                info = hardware.get(mac, {})
+                adapters.append(
+                    {
+                        "mac": mac,
+                        "name": rest or info.get("hci") or mac,
+                        "selected": selected,
+                        "hci": info.get("hci", ""),
+                        "bus": info.get("bus", ""),
+                        "product": info.get("product", ""),
+                        "powered": self._adapter_powered(mac),
+                    }
+                )
+            return adapters
+
+    def _adapter_powered(self, mac):
+        try:
+            out = self._send("show %s" % mac)
+        except BluetoothctlError:
+            return None
+        for line in out.splitlines():
+            if line.strip().startswith("Powered:"):
+                return line.split(":", 1)[1].strip() == "yes"
+        return None
+
+    def select_adapter(self, mac):
+        """Point the session at another controller and power it up."""
+        with self._locked(-1):
+            # `select` prints nothing on success, so confirm via `list` instead
+            # of trying to read a result out of it.
+            self._send("select %s" % mac)
+            adapters = self.list_adapters()
+            chosen = next((a for a in adapters if a["mac"] == mac), None)
+            if chosen is None:
+                raise BluetoothctlError("no controller %s on this host" % mac)
+            if not chosen["selected"]:
+                raise BluetoothctlError(
+                    "bluetoothctl did not switch to %s" % mac
+                )
+            try:
+                self._send("power on")
+            except BluetoothctlError:
+                pass
+            return adapters
 
     # ---- actions -----------------------------------------------------------
 
@@ -402,6 +603,95 @@ class Bluetoothctl:
     def remove(self, mac):
         return self._send_checked("remove %s" % mac)
 
+    def reconnect(self, mac):
+        """Drop the link and bring it straight back.
+
+        The usual fix for a speaker that is nominally connected but silent, or
+        one that came back from standby on a stale link. Disconnect failures are
+        ignored: not being connected is a perfectly good starting point.
+        """
+        steps = []
+        with self._locked(-1):
+            try:
+                output = self.disconnect(mac)
+                steps.append({"step": "disconnect", "ok": True, "output": _tail(output)})
+            except BluetoothctlError as exc:
+                steps.append({"step": "disconnect", "ok": True,
+                              "output": "already disconnected (%s)" % exc})
+            try:
+                output = self.connect(mac)
+            except BluetoothctlError as exc:
+                steps.append({"step": "connect", "ok": False, "output": str(exc)})
+                raise StepFailure(str(exc), steps) from exc
+            steps.append({"step": "connect", "ok": True, "output": _tail(output)})
+        return steps
+
+    def repair(self, mac):
+        """Forget the pairing and establish it again from scratch.
+
+        Destructive on purpose: `remove` drops the link key, so the device has
+        to be in pairing mode for the follow-up to succeed. Callers should
+        confirm with the user first -- if the peer is not pairing-ready the
+        result is an unpaired device.
+
+        `remove` also deletes BlueZ's device object, and `pair` on an object
+        that no longer exists just answers "not available". So this rediscovers
+        the device before trying to pair, rather than assuming BlueZ still knows
+        about something it was explicitly told to forget.
+        """
+        steps = []
+        with self._locked(-1):
+            try:
+                output = self.remove(mac)
+                steps.append({"step": "forget", "ok": True, "output": _tail(output)})
+            except BluetoothctlError as exc:
+                steps.append({"step": "forget", "ok": True,
+                              "output": "not paired (%s)" % exc})
+
+            found = self._rediscover(mac)
+            steps.append({
+                "step": "rediscover", "ok": found,
+                "output": "found again" if found else
+                          "not seen in %ds -- is it in pairing mode?" % REDISCOVER_TIMEOUT,
+            })
+            if not found:
+                raise StepFailure(
+                    "%s did not reappear after being forgotten -- put it in "
+                    "pairing mode and try again" % mac, steps)
+
+            for name, action in (
+                ("pair", self.pair),
+                ("trust", self.trust),
+                ("connect", self.connect),
+            ):
+                try:
+                    output = action(mac)
+                except BluetoothctlError as exc:
+                    steps.append({"step": name, "ok": False, "output": str(exc)})
+                    raise StepFailure(str(exc), steps) from exc
+                steps.append({"step": name, "ok": True, "output": _tail(output)})
+        return steps
+
+    def _rediscover(self, mac, timeout=None):
+        """Scan until `mac` shows up again, or the budget runs out."""
+        timeout = REDISCOVER_TIMEOUT if timeout is None else timeout
+        deadline = time.time() + timeout
+        try:
+            self._send_checked("scan on")
+        except BluetoothctlError:
+            return False
+        try:
+            while time.time() < deadline:
+                time.sleep(1.0)
+                if mac in self._device_macs():
+                    return True
+        finally:
+            try:
+                self._send("scan off")
+            except BluetoothctlError:
+                pass
+        return mac in self._device_macs()
+
     def quick_pair(self, mac):
         """pair -> trust -> connect, the sequence the README used to spell out.
 
@@ -430,6 +720,10 @@ class StepFailure(BluetoothctlError):
     def __init__(self, message, steps):
         super().__init__(message)
         self.steps = steps
+
+
+def _has_name(name, mac):
+    return name.strip().upper().replace("-", ":") != mac.upper()
 
 
 def _first_failure_line(out):
