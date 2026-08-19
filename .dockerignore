@@ -1,0 +1,11 @@
+# The build context is app.py, btctl.py, healthcheck.py and static/ -- nothing else.
+.git
+.github
+tests
+*.md
+LICENSE
+docker-compose*.yaml
+docker-compose*.yml
+__pycache__
+*.pyc
+.pytest_cache

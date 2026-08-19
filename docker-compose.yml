@@ -1,0 +1,21 @@
+# Local build. `docker compose up --build`, then open http://<host>:8088
+services:
+  bluetooth-web:
+    build: .
+    container_name: bluetooth-web
+
+    ports:
+      - "8088:8080"
+
+    volumes:
+      # The one and only thing this container needs from the host. Read-write is
+      # required: D-Bus is a bidirectional socket, :ro breaks the connection.
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
+
+    environment:
+      # Leave empty to disable auth entirely (trusted LAN only).
+      - ADMIN_PASSWORD=changeme
+      - ADMIN_USER=admin
+      - DEBUG=false
+
+    restart: unless-stopped

@@ -1,0 +1,132 @@
+name: Build_Push_Scan
+
+permissions:
+  contents: read
+  packages: write   # required for pushing to GHCR
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '*.md'
+      - 'LICENSE'
+      # Not part of the image (see .dockerignore) -- editing them should not republish it
+      - 'docker-compose*.yaml'
+      - 'docker-compose*.yml'
+  pull_request:
+    branches: [ main ]
+  # Rebuild weekly so Debian security updates reach the published image even when
+  # there are no commits (paths-ignore above only applies to push events).
+  schedule:
+    - cron: '0 4 * * 1'
+  release:
+    types: [ published ]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Manual tag name (defaults to latest if empty)'
+        required: false
+        default: 'latest'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # The suite drives a fake bluetoothctl (tests/mock_bluetoothctl.py), so it needs
+  # no adapter, no D-Bus and no root -- it runs on a stock runner.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install test dependencies
+        run: pip install --disable-pip-version-check flask pexpect pytest
+
+      - name: Run tests
+        run: python -m pytest tests/ -v
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GitHub Container Registry
+        # Skipped on pull requests: forks have no write access to GHCR, and a PR
+        # only needs to prove the image still builds.
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # REFRESH_WEEK changes every ISO week so the scheduled rebuild really
+      # re-runs apt-get upgrade instead of restoring a stale layer from the cache.
+      - name: Resolve cache epoch
+        id: inputs
+        run: echo "refresh_week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/bluetooth-web
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=raw,value=${{ github.event.inputs.tag_name }},enable=${{ github.event_name == 'workflow_dispatch' }}
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            REFRESH_WEEK=${{ steps.inputs.outputs.refresh_week }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  scan:
+    needs: build-and-push
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/bluetooth-web:${{ needs.build-and-push.outputs.image_tag }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          # Debian carries a large backlog of CVEs it has not patched; reporting
+          # them buries the ones a rebuild can actually fix.
+          ignore-unfixed: true
+          exit-code: "0"
+
+      - name: Upload Trivy results to the Security tab
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif

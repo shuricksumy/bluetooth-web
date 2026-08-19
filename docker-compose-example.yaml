@@ -1,0 +1,25 @@
+# bluetooth-web -- pair Bluetooth audio sinks from a browser.
+# Published image. Open http://<host>:8088 once it is up.
+services:
+  bluetooth-web:
+    image: ghcr.io/shuricksumy/bluetooth-web:latest
+    container_name: bluetooth-web
+
+    ports:
+      - "8088:8080"
+
+    volumes:
+      # The one and only thing this container needs from the host. Read-write is
+      # required: D-Bus is a bidirectional socket, :ro breaks the connection.
+      # Everything the panel does is a method call into the host's bluetoothd --
+      # no privileged mode, no cap_add, no host networking, no /dev passthrough.
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
+
+    environment:
+      # HTTP Basic Auth over every route. Leave empty (or drop the line) to
+      # disable auth entirely -- only sane on a trusted LAN, since anyone who
+      # reaches the port can then pair and unpair your devices.
+      - ADMIN_PASSWORD=changeme
+      - ADMIN_USER=admin
+
+    restart: unless-stopped
