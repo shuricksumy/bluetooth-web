@@ -55,6 +55,8 @@ def test_devices_listed_with_state(client):
         "paired": True,
         "connected": True,
         "trusted": True,
+        # Derived so the Add-player form can prefill PIPEWIRE_NODE.
+        "node": "bluez_output.AA_BB_CC_DD_EE_01.1",
     }
     assert by_mac["AA:BB:CC:DD:EE:03"]["paired"] is False
     assert body["warnings"] == []
@@ -592,3 +594,100 @@ def test_index_html_only_calls_routes_that_exist():
         if str(rule).startswith("/api/")
     }
     assert referenced <= served, referenced - served
+
+
+# ---- player routes ----------------------------------------------------------
+
+
+@pytest.fixture
+def player_client(tmp_path, monkeypatch):
+    """App wired to a fake snapclient and an isolated players.json."""
+    monkeypatch.setenv("CONFIG_DIR", str(tmp_path))
+    app_module = load_app("ok")
+    players_mod = sys.modules["players"]
+    monkeypatch.setattr(
+        players_mod, "SNAPCLIENT", os.path.join(ROOT, "tests", "fake_snapclient.py")
+    )
+    monkeypatch.setattr(players_mod, "list_sinks", list)
+    monkeypatch.setattr(players_mod, "sink_present", lambda node: True)
+    monkeypatch.setattr(players_mod, "set_sink_volume", lambda node, vol: None)
+    app_module.supervisor.config_path = str(tmp_path / "players.json")
+    yield app_module.app.test_client()
+    app_module.supervisor.stop_all()
+
+
+def test_players_start_empty(player_client):
+    assert player_client.get("/api/players").get_json()["players"] == []
+
+
+def test_create_player_from_a_paired_device(player_client):
+    res = player_client.post("/api/players", json={
+        "name": "BoomBox", "mac": "5C:01:3B:63:E7:BA",
+        "server": "192.168.111.50", "autostart": False,
+    })
+    assert res.status_code == 201
+    player = res.get_json()["player"]
+    assert player["node"] == "bluez_output.5C_01_3B_63_E7_BA.1"
+    assert player["state"] == "stopped"
+
+
+def test_devices_carry_the_node_they_would_expose(player_client):
+    devices = player_client.get("/api/devices").get_json()["devices"]
+    target = next(d for d in devices if d["mac"] == "AA:BB:CC:DD:EE:01")
+    assert target["node"] == "bluez_output.AA_BB_CC_DD_EE_01.1"
+
+
+def test_player_lifecycle_over_http(player_client):
+    created = player_client.post("/api/players", json={
+        "name": "Kitchen", "mac": "5C:01:3B:63:E7:BA", "autostart": False,
+    }).get_json()["player"]
+    pid = created["id"]
+
+    assert player_client.post("/api/players/%s/start" % pid).status_code == 200
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        state = player_client.get("/api/players").get_json()["players"][0]["state"]
+        if state == "running":
+            break
+        time.sleep(0.1)
+    assert state == "running"
+
+    logs = player_client.get("/api/players/%s/logs" % pid).get_json()["logs"]
+    assert any("--hostID Kitchen" in line for line in logs)
+
+    assert player_client.post("/api/players/%s/stop" % pid).status_code == 200
+    assert player_client.get("/api/players").get_json()["players"][0]["state"] == "stopped"
+
+    assert player_client.delete("/api/players/%s" % pid).status_code == 200
+    assert player_client.get("/api/players").get_json()["players"] == []
+
+
+def test_invalid_player_is_rejected_with_a_message(player_client):
+    res = player_client.post("/api/players", json={"name": "", "server": "x"})
+    assert res.status_code == 400
+    assert "name" in res.get_json()["error"]
+
+
+def test_unknown_player_and_action(player_client):
+    assert player_client.post("/api/players/nope/start").status_code == 400
+    created = player_client.post("/api/players", json={
+        "name": "X", "mac": "5C:01:3B:63:E7:BA", "autostart": False,
+    }).get_json()["player"]
+    assert player_client.post(
+        "/api/players/%s/explode" % created["id"]).status_code == 404
+
+
+def test_patch_updates_a_player(player_client):
+    created = player_client.post("/api/players", json={
+        "name": "Old", "mac": "5C:01:3B:63:E7:BA", "autostart": False,
+    }).get_json()["player"]
+    res = player_client.patch("/api/players/%s" % created["id"],
+                              json={"name": "New", "latency_ms": -180})
+    assert res.status_code == 200
+    player = res.get_json()["player"]
+    assert player["name"] == "New"
+    assert player["latency_ms"] == -180
+
+
+def test_sinks_endpoint_is_available(player_client):
+    assert player_client.get("/api/sinks").get_json() == {"sinks": []}

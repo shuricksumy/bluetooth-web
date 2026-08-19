@@ -17,9 +17,20 @@ services:
     #  - apparmor=unconfined
 
     volumes:
-      # The one and only thing this container needs from the host. Read-write is
-      # required: D-Bus is a bidirectional socket, :ro breaks the connection.
+      # The Bluetooth half needs only this. Read-write is required: D-Bus is a
+      # bidirectional socket, :ro breaks the connection. No privileged mode, no
+      # cap_add, no host networking -- the panel only makes method calls into
+      # the host's bluetoothd. The three mounts below are for the Snapcast
+      # players; drop them if you only want device pairing.
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
+      # Players are snapclient processes in this container, so it needs the
+      # host's PipeWire session the same way pipewire-snapclient does. Check
+      # your uid with `id -u`; 1000 is the usual desktop user.
+      - /run/user/1000/pipewire-0:/tmp/pipewire-0
+      # PipeWire's shared-memory transport
+      - /dev/shm:/dev/shm
+      # Keeps players.json across image updates
+      - ./bluetooth-web-config:/config
 
     environment:
       # Leave empty to disable auth entirely (trusted LAN only).

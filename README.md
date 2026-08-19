@@ -2,9 +2,9 @@
 
 [![Build_Push_Scan](https://github.com/shuricksumy/bluetooth-web/actions/workflows/build.yml/badge.svg)](https://github.com/shuricksumy/bluetooth-web/actions/workflows/build.yml)
 
-A tiny web admin panel for pairing, connecting and removing Bluetooth devices on
-the **host** — scan, pair and trust a speaker from a browser instead of SSHing in
-and driving `bluetoothctl` or the `bluetuith` TUI by hand.
+A web admin panel for Bluetooth audio on a Linux host: pair a speaker from the
+browser, then run a **Snapcast player** against it — no SSH, no `bluetoothctl`,
+no hand-copying `bluez_output.*` node names into a compose file.
 
 Built as a companion to [pipewire-snapclient](https://github.com/shuricksumy/pipewire-snapclient):
 pair a Bluetooth sink here, then feed its `bluez_output.*` node name to that
@@ -37,6 +37,13 @@ plain D-Bus client against the host's daemon, so the host keeps owning the radio
   round trips rather than one `info <mac>` per device.
 - **No build step, no pip.** Vanilla JS in a single static page; Flask and pexpect
   come from Debian packages, so security updates arrive with a plain rebuild.
+- **Snapcast players, created and supervised from the web.** Each player is a
+  `snapclient` process bound to one PipeWire sink, with start/stop/restart,
+  live state, log tail and a 5s→60s reconnect backoff. Definitions persist in
+  `/config/players.json`.
+- **The node name is derived for you.** A paired speaker's sink is
+  `bluez_output.<MAC with underscores>.1`, so the Add-player form prefills it —
+  that is the `pw-cli ls Node | grep` step gone.
 - **Optional HTTP Basic Auth** via `ADMIN_PASSWORD`.
 - **Degrades honestly.** No adapter, no bluetoothd, no D-Bus socket or an
   AppArmor denial each produce a specific message in the UI, not a spinner and
@@ -206,6 +213,45 @@ REPL that takes one command per line, so a MAC carrying an embedded newline woul
 let a caller append arbitrary `bluetoothctl` commands to the session. Anything that
 is not exactly a MAC is rejected with a 400.
 
+## 🔊 Snapcast players
+
+Pair a speaker on the **Devices** tab, then switch to **Players** → *Add player*.
+Pick the device, and the form fills in the rest:
+
+| Field | Default | Why |
+| :-- | :-- | :-- |
+| Output | the paired device | Determines `PIPEWIRE_NODE`; Bluetooth devices are listed first |
+| Name | the device's name | `--hostID`, i.e. what Snapcast and Music Assistant show |
+| Snapserver | the host you are browsing | Usually correct: the panel and the server are typically the same box |
+| Port | `1704` | Snapcast's stream port |
+| Latency (ms) | `0` | **Sync offset — see below** |
+| PipeWire buffer | `1024/48000` for BT, `2048/192000` otherwise | quantum/rate |
+| ALSA bridge | on | `--player alsa -s default`; copes with a sink changing rate under it |
+
+Starting a player **connects its Bluetooth device first** and waits up to 20 s for
+the sink to appear, because a `bluez_output` node only exists while the speaker is
+connected. If it never shows up the player sits in `waiting` and says so rather
+than thrashing.
+
+### ⚠️ Bluetooth latency
+
+A2DP adds roughly **150–250 ms**. Against wired rooms a Bluetooth speaker will be
+audibly late until you compensate, so set a **negative** *Latency (ms)* — start
+around `-180` and tune by ear. This is the single thing most likely to make a new
+BT player sound wrong, and it is not a bug in the player.
+
+### What this costs you
+
+Players are children of this container, so **restarting the panel stops every
+player**. If you want audio that survives a panel restart, run those players as
+separate [pipewire-snapclient](https://github.com/shuricksumy/pipewire-snapclient)
+containers instead — this panel deliberately leaves containers it did not create
+alone.
+
+Players need three mounts the Bluetooth half does not: the host's PipeWire socket,
+`/dev/shm`, and a `/config` volume for `players.json`. Drop them if you only want
+device pairing.
+
 ## 🧩 API
 
 Every route returns JSON. `<mac>` must match the pattern above or the request is
@@ -220,6 +266,15 @@ rejected with `400 {"error": "invalid MAC address"}`.
 | `POST` | `/api/disconnect/<mac>` | — | Disconnect. |
 | `POST` | `/api/trust/<mac>` | — | Mark trusted so the device may reconnect itself. |
 | `POST` | `/api/remove/<mac>` | — | Forget the pairing. |
+| `GET` | `/api/adapters` | — | Controllers on this host (`hci0`, bus, product). |
+| `POST` | `/api/adapter/<mac>` | — | Switch which controller everything acts on. |
+| `GET` | `/api/players` | — | Players with state, uptime and restart count. |
+| `POST` | `/api/players` | player JSON | Create one. |
+| `PATCH` | `/api/players/<id>` | partial JSON | Update; a running player is restarted. |
+| `DELETE` | `/api/players/<id>` | — | Stop and forget. |
+| `POST` | `/api/players/<id>/{start,stop,restart}` | — | Lifecycle. |
+| `GET` | `/api/players/<id>/logs` | — | Last 200 log lines. |
+| `GET` | `/api/sinks` | — | PipeWire sinks available right now. |
 
 A successful response carries the refreshed table, so the UI never needs a second
 round trip:
@@ -282,6 +337,7 @@ docker build -t bluetooth-web .
 | File | Role |
 | :-- | :-- |
 | [`app.py`](app.py) | Flask routes, MAC validation, Basic Auth, the stale-cache fallback |
+| [`players.py`](players.py) | Supervised `snapclient` children: launch, backoff, logs, persistence |
 | [`btctl.py`](btctl.py) | The one long-lived `bluetoothctl` REPL, its lock, and all output parsing |
 | [`static/index.html`](static/index.html) | The entire frontend — vanilla JS, no build step |
 | [`healthcheck.py`](healthcheck.py) | Docker `HEALTHCHECK`; any HTTP answer counts as alive |

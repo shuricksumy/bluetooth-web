@@ -9,6 +9,7 @@ Deliberately small: no database, no build step, no websockets. The browser polls
 /api/devices and every action is a POST that returns the refreshed table.
 """
 
+import atexit
 import hmac
 import logging
 import os
@@ -18,7 +19,9 @@ import time
 
 from flask import Flask, jsonify, request, send_from_directory
 
+import players as players_mod
 from btctl import Bluetoothctl, BluetoothBusy, BluetoothctlError, StepFailure
+from players import PlayerError, Supervisor
 
 # A MAC and nothing else. This is the only user-controlled value that reaches
 # bluetoothctl's stdin, and the REPL takes one command per line, so a MAC
@@ -50,6 +53,15 @@ btctl = Bluetoothctl(command=os.environ.get("BLUETOOTHCTL", "bluetoothctl"))
 
 ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+
+# Players are snapclient children of this process. connect_bluetooth is injected
+# so players.py never has to know about BlueZ: starting a player whose sink is a
+# Bluetooth speaker means connecting that speaker first.
+def _connect_for_player(mac):
+    return btctl.connect(mac)
+
+
+supervisor = Supervisor(connect_bluetooth=_connect_for_player)
 
 _cache_lock = threading.Lock()
 _cache = {"devices": [], "at": 0.0}
@@ -90,6 +102,10 @@ def require_auth():
 
 
 def devices_payload(devices, **extra):
+    for device in devices:
+        # What this speaker will show up as in PipeWire once connected. Saves
+        # the `pw-cli ls Node | grep` step when creating a player for it.
+        device.setdefault("node", players_mod.node_for_mac(device["mac"]))
     payload = {"devices": devices, "warnings": list(btctl.warnings)}
     payload.update(extra)
     return payload
@@ -127,6 +143,11 @@ def action(mac, func, label):
     except BluetoothctlError:
         devices, _ = cached_devices()
     return jsonify(devices_payload(devices, ok=True, action=label, output=output.strip()))
+
+
+@app.errorhandler(PlayerError)
+def handle_player_error(exc):
+    return jsonify(ok=False, error=str(exc)), exc.status
 
 
 @app.errorhandler(BluetoothctlError)
@@ -178,6 +199,59 @@ def api_select_adapter(mac):
     return jsonify(
         devices_payload(devices, ok=True, action="adapter", adapters=adapters)
     )
+
+
+# ---- players ----------------------------------------------------------------
+
+
+@app.get("/api/players")
+def api_players():
+    return jsonify(players=supervisor.list())
+
+
+@app.get("/api/sinks")
+def api_sinks():
+    """PipeWire sinks available right now -- what a player can be bound to."""
+    return jsonify(sinks=players_mod.list_sinks())
+
+
+@app.post("/api/players")
+def api_create_player():
+    player = supervisor.create(request.get_json(silent=True) or {})
+    return jsonify(ok=True, player=player.status(), players=supervisor.list()), 201
+
+
+@app.patch("/api/players/<player_id>")
+def api_update_player(player_id):
+    player = supervisor.update(player_id, request.get_json(silent=True) or {})
+    return jsonify(ok=True, player=player.status(), players=supervisor.list())
+
+
+@app.delete("/api/players/<player_id>")
+def api_delete_player(player_id):
+    supervisor.delete(player_id)
+    return jsonify(ok=True, players=supervisor.list())
+
+
+@app.post("/api/players/<player_id>/<action>")
+def api_player_action(player_id, action):
+    if action not in ("start", "stop", "restart"):
+        return jsonify(ok=False, error="unknown action"), 404
+    player = supervisor.get(player_id)
+    if action in ("stop", "restart"):
+        player.stop()
+    if action in ("start", "restart"):
+        player.start()
+    return jsonify(ok=True, players=supervisor.list())
+
+
+@app.get("/api/players/<player_id>/logs")
+def api_player_logs(player_id):
+    player = supervisor.get(player_id)
+    return jsonify(logs=list(player.logs))
+
+
+# ---- devices ----------------------------------------------------------------
 
 
 @app.get("/api/devices")
@@ -287,6 +361,9 @@ def main():
             "ADMIN_PASSWORD is not set -- every route is open to anyone who can "
             "reach this port. Intended for a trusted LAN only."
         )
+    supervisor.autostart()
+    atexit.register(supervisor.stop_all)
+
     # threaded=True so the 5s poll and the healthcheck are not queued behind a
     # long pair/connect; the REPL itself is still serialised by btctl's lock.
     app.run(

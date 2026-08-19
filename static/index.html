@@ -64,15 +64,47 @@
   .dot { display: inline-block; width: .5rem; height: .5rem; border-radius: 50%; background: var(--line); margin-right: .4rem; }
   .dot.live { background: var(--ok); }
   .adapter { font-size: .78rem; color: var(--muted); }
+  nav { display: flex; gap: .3rem; }
+  nav button { margin: 0; }
+  nav button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .state { font-size: .72rem; font-weight: 600; padding: .14rem .5rem; border-radius: 999px; }
+  .state.running { background: var(--okbg); color: var(--ok); }
+  .state.stopped { background: var(--line); color: var(--muted); }
+  .state.waiting, .state.backoff, .state.starting { background: var(--warnbg); color: var(--warn); }
+  .state.failed { background: var(--dangerbg); color: var(--danger); }
+  dialog {
+    border: 1px solid var(--line); border-radius: 12px; background: var(--card);
+    color: var(--fg); padding: 1.1rem 1.25rem; max-width: 34rem; width: 92vw;
+  }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+  dialog h3 { margin: 0 0 .8rem; font-size: 1.05rem; }
+  .field { display: grid; grid-template-columns: 11rem 1fr; gap: .5rem; align-items: center; margin-bottom: .55rem; }
+  .field label { font-size: .85rem; color: var(--muted); }
+  .field input[type=text], .field input[type=number], .field select {
+    font: inherit; padding: .32rem .45rem; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--fg); width: 100%;
+  }
+  .field .hint2 { grid-column: 2; font-size: .74rem; color: var(--muted); margin-top: -.3rem; }
+  .dlg-actions { display: flex; justify-content: flex-end; gap: .4rem; margin-top: .9rem; }
+  pre.logs {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+    padding: .6rem; font-size: .74rem; max-height: 20rem; overflow: auto; margin: 0;
+    white-space: pre-wrap; word-break: break-all;
+  }
 </style>
 
 <main>
   <header>
     <h1>Bluetooth Panel</h1>
-    <label class="muted">adapter
+    <nav>
+      <button id="tabDevices" class="active">Devices</button>
+      <button id="tabPlayers">Players</button>
+    </nav>
+    <span style="flex:1 1 auto"></span>
+    <label class="muted devices-only">adapter
       <select id="adapter"><option>…</option></select>
     </label>
-    <label class="muted">for
+    <label class="muted devices-only">for
       <select id="duration">
         <option value="5">5s</option>
         <option value="10" selected>10s</option>
@@ -80,11 +112,13 @@
         <option value="30">30s</option>
       </select>
     </label>
-    <button id="scan" class="primary">Scan for new devices</button>
+    <button id="scan" class="primary devices-only">Scan for new devices</button>
+    <button id="addPlayer" class="primary players-only" hidden>Add player</button>
   </header>
 
   <div id="notes"></div>
 
+  <section id="viewDevices">
   <h2>Paired <span class="count" id="pairedCount"></span></h2>
   <div class="card">
     <table>
@@ -106,6 +140,94 @@
     </table>
     <div id="foundEmpty" class="empty">Nothing unpaired in range. Put the device in pairing mode, then Scan.</div>
   </div>
+
+  </section>
+
+  <section id="viewPlayers" hidden>
+    <h2>Snapcast players <span class="count" id="playerCount"></span></h2>
+    <div class="card">
+      <table>
+        <thead><tr><th>Player</th><th>Sink</th><th>Server</th><th>State</th><th></th></tr></thead>
+        <tbody id="playerRows"></tbody>
+      </table>
+      <div id="playerEmpty" class="empty">
+        No players yet. Pair a speaker on the Devices tab, then Add player.
+      </div>
+    </div>
+    <p class="hint">
+      Each player is a supervised <code>snapclient</code> inside this container, bound to one
+      PipeWire sink. Starting one connects its Bluetooth device first and waits for the sink
+      to appear. Restarting this container stops every player.
+    </p>
+  </section>
+
+  <dialog id="playerDialog">
+    <form method="dialog" id="playerForm">
+      <h3 id="dialogTitle">Add player</h3>
+
+      <div class="field">
+        <label for="fSource">Output</label>
+        <select id="fSource"></select>
+        <div class="hint2" id="fSourceHint">Paired Bluetooth devices and current PipeWire sinks.</div>
+      </div>
+      <div class="field">
+        <label for="fName">Name</label>
+        <input type="text" id="fName" required maxlength="64">
+        <div class="hint2">Shown in Snapcast / Music Assistant (<code>--hostID</code>).</div>
+      </div>
+      <div class="field">
+        <label for="fServer">Snapserver</label>
+        <input type="text" id="fServer" required>
+      </div>
+      <div class="field">
+        <label for="fPort">Port</label>
+        <input type="number" id="fPort" min="1" max="65535" value="1704">
+      </div>
+      <div class="field">
+        <label for="fLatency">Latency (ms)</label>
+        <input type="number" id="fLatency" min="-2000" max="2000" value="0">
+        <div class="hint2" id="fLatencyHint">
+          Sync offset. Bluetooth adds 150-250 ms, so a BT speaker usually needs a
+          negative value to line up with your wired rooms. Tune by ear.
+        </div>
+      </div>
+      <div class="field">
+        <label for="fPwLatency">PipeWire buffer</label>
+        <input type="text" id="fPwLatency" placeholder="1024/48000">
+        <div class="hint2">quantum/rate. 1024/48000 for Bluetooth, 2048/192000 for a USB DAC.</div>
+      </div>
+      <div class="field">
+        <label for="fVolume">Initial volume</label>
+        <input type="number" id="fVolume" min="0" max="1" step="0.05" value="1.0">
+      </div>
+      <div class="field">
+        <label for="fUseAlsa">ALSA bridge</label>
+        <select id="fUseAlsa">
+          <option value="true" selected>on - copes with rate changes</option>
+          <option value="false">off - native PipeWire</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="fAutostart">Start automatically</label>
+        <select id="fAutostart">
+          <option value="true" selected>yes</option>
+          <option value="false">no</option>
+        </select>
+      </div>
+
+      <div id="dialogError" class="note err" style="display:none"></div>
+      <div class="dlg-actions">
+        <button type="button" id="dialogCancel">Cancel</button>
+        <button type="submit" class="primary" id="dialogSave">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="logDialog">
+    <h3 id="logTitle">Logs</h3>
+    <pre class="logs" id="logBody">…</pre>
+    <div class="dlg-actions"><button type="button" id="logClose">Close</button></div>
+  </dialog>
 
   <p class="hint">
     <span class="dot" id="live"></span><span id="status">idle</span>
@@ -256,6 +378,7 @@
 
   async function refresh() {
     if (busy || document.hidden) return;
+    if (!$("viewPlayers").hidden) refreshPlayers();
     const data = await call("/api/devices");
     if (data.devices) render(data.devices);
     // Keep a success message from the last action visible instead of stomping it.
@@ -310,6 +433,240 @@
 
   // --- wiring ----------------------------------------------------------------
 
+  // --- players ---------------------------------------------------------------
+
+  let lastPlayers = [];
+  let lastSinks = [];
+  let editing = null;   // player id when editing, null when adding
+
+  const secs = (n) => {
+    n = Math.floor(n);
+    if (n < 60) return n + "s";
+    if (n < 3600) return Math.floor(n / 60) + "m " + (n % 60) + "s";
+    return Math.floor(n / 3600) + "h " + Math.floor((n % 3600) / 60) + "m";
+  };
+
+  function renderPlayers(players) {
+    lastPlayers = players;
+    const rows = $("playerRows");
+    rows.replaceChildren();
+    $("playerCount").textContent = players.length ? `(${players.length})` : "";
+    $("playerEmpty").style.display = players.length ? "none" : "block";
+
+    for (const p of players) {
+      const tr = document.createElement("tr");
+      // A sink that is not present is the normal state for a powered-off
+      // speaker, so say so plainly rather than flagging it as an error.
+      const sink = p.node
+        ? `<span class="mac">${esc(p.node)}</span>` +
+          (p.node_present === false ? ` <span class="badge">absent</span>` : "")
+        : `<span class="muted">default sink</span>`;
+      const detail = p.detail ? ` <span class="muted">${esc(p.detail)}</span>` : "";
+      const meta = p.running
+        ? ` <span class="muted">${secs(p.uptime)}</span>`
+        : (p.restarts ? ` <span class="muted">${p.restarts} restarts</span>` : "");
+
+      tr.innerHTML =
+        `<td>${esc(p.name)}</td>` +
+        `<td>${sink}</td>` +
+        `<td class="mac">${esc(p.server)}:${p.port}</td>` +
+        `<td><span class="state ${esc(p.state)}">${esc(p.state)}</span>${detail}${meta}</td>` +
+        `<td class="actions">` +
+          (p.running
+            ? `<button data-do="stop">Stop</button><button data-do="restart">Restart</button>`
+            : `<button data-do="start" class="primary">Start</button>`) +
+          `<button data-do="logs">Logs</button>` +
+          `<button data-do="edit">Edit</button>` +
+          `<button data-do="delete" class="danger">Delete</button>` +
+        `</td>`;
+
+      tr.querySelectorAll("button").forEach((b) =>
+        b.addEventListener("click", () => playerAction(b.dataset.do, p)));
+      rows.appendChild(tr);
+    }
+  }
+
+  async function playerAction(what, player) {
+    if (what === "edit") return openDialog(player);
+    if (what === "logs") return showLogs(player);
+    if (what === "delete") {
+      if (!confirm(`Delete player ${player.name}? This stops it and forgets its settings.`)) return;
+      setBusy(true, `deleting ${player.name}…`);
+      const data = await call(`/api/players/${encodeURIComponent(player.id)}`,
+        { method: "DELETE" });
+      setNotes(data, data.ok ? `deleted ${player.name}` : null);
+      if (data.players) renderPlayers(data.players);
+      setBusy(false, "");
+      return;
+    }
+    setBusy(true, `${what} ${player.name}…`);
+    const data = await call(
+      `/api/players/${encodeURIComponent(player.id)}/${what}`, { method: "POST" });
+    setNotes(data, data.ok ? `${what}: ${player.name}` : null);
+    if (data.players) renderPlayers(data.players);
+    setBusy(false, "");
+    refreshPlayers();
+  }
+
+  async function showLogs(player) {
+    $("logTitle").textContent = `Logs — ${player.name}`;
+    $("logBody").textContent = "loading…";
+    $("logDialog").showModal();
+    const data = await call(`/api/players/${encodeURIComponent(player.id)}/logs`);
+    $("logBody").textContent = (data.logs || []).join("\n") || "(nothing logged yet)";
+    $("logBody").scrollTop = $("logBody").scrollHeight;
+  }
+
+  // --- add / edit dialog -------------------------------------------------------
+
+  function sourceOptions() {
+    // Paired Bluetooth devices first: those are the ones this panel exists for.
+    const out = [];
+    for (const d of lastDevices.filter((d) => d.paired)) {
+      out.push({
+        value: "bt:" + d.mac,
+        label: `${d.name} — Bluetooth${d.connected ? "" : " (disconnected)"}`,
+        name: d.name, mac: d.mac, node: d.node, bt: true,
+      });
+    }
+    for (const s of lastSinks.filter((s) => !s.bluetooth)) {
+      out.push({
+        value: "sink:" + s.node,
+        label: `${s.description} — PipeWire sink`,
+        name: s.description, mac: "", node: s.node, bt: false,
+      });
+    }
+    return out;
+  }
+
+  function applySource(opt) {
+    if (!opt) return;
+    if (!$("fName").value || $("fName").dataset.auto === "1") {
+      // Snapcast host ids travel through Music Assistant; keep them tame.
+      $("fName").value = opt.name.replace(/[^A-Za-z0-9 ._-]/g, "").slice(0, 64);
+      $("fName").dataset.auto = "1";
+    }
+    $("fPwLatency").value = opt.bt ? "1024/48000" : "2048/192000";
+    $("fLatencyHint").style.opacity = opt.bt ? "1" : ".6";
+  }
+
+  function openDialog(player) {
+    editing = player ? player.id : null;
+    $("dialogTitle").textContent = player ? `Edit ${player.name}` : "Add player";
+    $("dialogError").style.display = "none";
+
+    const select = $("fSource");
+    select.replaceChildren();
+    const options = sourceOptions();
+    for (const o of options) {
+      const el = document.createElement("option");
+      el.value = o.value;
+      el.textContent = o.label;
+      select.appendChild(el);
+    }
+    if (!options.length) {
+      const el = document.createElement("option");
+      el.value = "";
+      el.textContent = "no paired device or sink found";
+      select.appendChild(el);
+    }
+
+    if (player) {
+      select.value = player.mac ? "bt:" + player.mac : "sink:" + player.node;
+      $("fName").value = player.name;
+      $("fName").dataset.auto = "0";
+      $("fServer").value = player.server;
+      $("fPort").value = player.port;
+      $("fLatency").value = player.latency_ms;
+      $("fPwLatency").value = player.pipewire_latency;
+      $("fVolume").value = player.volume;
+      $("fUseAlsa").value = String(!!player.use_alsa);
+      $("fAutostart").value = String(!!player.autostart);
+    } else {
+      $("fName").value = "";
+      $("fName").dataset.auto = "1";
+      // The snapserver is almost always the box you are browsing this on --
+      // that is exactly how the existing players on this host are configured.
+      $("fServer").value = (lastPlayers[0] && lastPlayers[0].server) || location.hostname;
+      $("fPort").value = 1704;
+      $("fLatency").value = 0;
+      $("fVolume").value = 1.0;
+      $("fUseAlsa").value = "true";
+      $("fAutostart").value = "true";
+      applySource(options.find((o) => o.value === select.value));
+    }
+    $("playerDialog").showModal();
+  }
+
+  async function savePlayer(event) {
+    event.preventDefault();
+    const options = sourceOptions();
+    const chosen = options.find((o) => o.value === $("fSource").value);
+    const body = {
+      name: $("fName").value.trim(),
+      mac: chosen ? chosen.mac : "",
+      node: chosen ? chosen.node : "",
+      server: $("fServer").value.trim(),
+      port: Number($("fPort").value),
+      latency_ms: Number($("fLatency").value),
+      pipewire_latency: $("fPwLatency").value.trim(),
+      volume: Number($("fVolume").value),
+      use_alsa: $("fUseAlsa").value === "true",
+      autostart: $("fAutostart").value === "true",
+    };
+
+    $("dialogSave").disabled = true;
+    const data = editing
+      ? await call(`/api/players/${encodeURIComponent(editing)}`,
+          { method: "PATCH", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body) })
+      : await call("/api/players",
+          { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body) });
+    $("dialogSave").disabled = false;
+
+    if (data.error) {
+      const box = $("dialogError");
+      box.textContent = data.error;
+      box.style.display = "block";
+      return;
+    }
+    $("playerDialog").close();
+    if (data.players) renderPlayers(data.players);
+    setNotes({}, editing ? "player updated" : "player created");
+    editing = null;
+  }
+
+  async function refreshPlayers() {
+    const [players, sinks] = await Promise.all([
+      call("/api/players"), call("/api/sinks"),
+    ]);
+    if (players.players) renderPlayers(players.players);
+    if (sinks.sinks) lastSinks = sinks.sinks;
+  }
+
+  // --- tabs --------------------------------------------------------------------
+
+  function showTab(which) {
+    const players = which === "players";
+    $("viewDevices").hidden = players;
+    $("viewPlayers").hidden = !players;
+    $("tabDevices").classList.toggle("active", !players);
+    $("tabPlayers").classList.toggle("active", players);
+    document.querySelectorAll(".devices-only").forEach((e) => (e.hidden = players));
+    document.querySelectorAll(".players-only").forEach((e) => (e.hidden = !players));
+    if (players) refreshPlayers();
+  }
+
+  $("tabDevices").addEventListener("click", () => showTab("devices"));
+  $("tabPlayers").addEventListener("click", () => showTab("players"));
+  $("addPlayer").addEventListener("click", () => openDialog(null));
+  $("fSource").addEventListener("change", () =>
+    applySource(sourceOptions().find((o) => o.value === $("fSource").value)));
+  $("playerForm").addEventListener("submit", savePlayer);
+  $("dialogCancel").addEventListener("click", () => { $("playerDialog").close(); editing = null; });
+  $("logClose").addEventListener("click", () => $("logDialog").close());
+
   scanBtn.addEventListener("click", scan);
   $("showUnnamed").addEventListener("change", () => render(lastDevices));
   adapterSel.addEventListener("change", (e) => selectAdapter(e.target.value));
@@ -321,6 +678,7 @@
     if (cfg.poll_seconds) pollMs = cfg.poll_seconds * 1000;
     await loadAdapters();
     await refresh();
+    await refreshPlayers();
     timer = setInterval(refresh, pollMs);
   })();
 })();
