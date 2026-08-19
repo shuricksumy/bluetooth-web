@@ -3,20 +3,31 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bluetooth Panel</title>
 <style>
+  /* Light is the base. Dark is applied when the system asks for it *and* the
+     user has not forced light, or when the user has explicitly chosen dark --
+     so the switcher wins in both directions and "system" needs no attribute. */
   :root {
-    color-scheme: light dark;
+    color-scheme: light;
     --bg: #f6f7f9; --fg: #14171a; --muted: #667085;
     --card: #ffffff; --line: #e3e6ea; --accent: #2f6fed;
     --ok: #1a7f45; --okbg: #e5f5ec; --warn: #8a6100; --warnbg: #fdf3d8;
-    --dangerbg: #fdeaea; --danger: #a52222;
+    --dangerbg: #fdeaea; --danger: #a52222; --shadow: 0 1px 2px rgba(16,24,40,.06);
   }
   @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
       --bg: #14171a; --fg: #e8eaed; --muted: #98a2b3;
       --card: #1d2125; --line: #2c3238; --accent: #6a9bff;
       --ok: #6ee7a8; --okbg: #14361f; --warn: #f2c94c; --warnbg: #3a2f0c;
-      --dangerbg: #3a1a1a; --danger: #ff8a8a;
+      --dangerbg: #3a1a1a; --danger: #ff8a8a; --shadow: none;
     }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #14171a; --fg: #e8eaed; --muted: #98a2b3;
+    --card: #1d2125; --line: #2c3238; --accent: #6a9bff;
+    --ok: #6ee7a8; --okbg: #14361f; --warn: #f2c94c; --warnbg: #3a2f0c;
+    --dangerbg: #3a1a1a; --danger: #ff8a8a; --shadow: none;
   }
   * { box-sizing: border-box; }
   body {
@@ -24,20 +35,43 @@
     font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
   main { max-width: 68rem; margin: 0 auto; }
-  header { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; margin-bottom: 1rem; }
-  h1 { font-size: 1.3rem; margin: 0; flex: 1 1 auto; }
+  /* Three tracks, equal outer columns, so the tabs sit dead centre whatever the
+     title says and however many controls the active tab needs.
+     minmax(0,1fr) rather than 1fr: a plain fr track has an automatic minimum, so
+     the wider Devices controls stretched their column and shoved the tabs
+     sideways on every switch. */
+  header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    gap: .75rem; align-items: center; margin-bottom: 1rem;
+  }
+  h1 { font-size: 1.25rem; margin: 0; white-space: nowrap; }
+  .head-actions {
+    display: flex; gap: .4rem; align-items: center;
+    justify-content: flex-end; flex-wrap: wrap;
+  }
+  @media (max-width: 900px) {
+    header { grid-template-columns: 1fr; justify-items: start; }
+    .head-actions { justify-content: flex-start; }
+  }
   h2 {
     font-size: .78rem; text-transform: uppercase; letter-spacing: .05em;
     color: var(--muted); margin: 1.4rem 0 .5rem;
   }
   h2 .count { color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: 0; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; overflow: hidden; box-shadow: var(--shadow);
+  }
   table { width: 100%; border-collapse: collapse; }
   th, td { padding: .6rem .75rem; text-align: left; border-bottom: 1px solid var(--line); vertical-align: middle; }
   th { font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
   tr:last-child td { border-bottom: none; }
   td.mac { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8rem; color: var(--muted); white-space: nowrap; }
   td.actions { text-align: right; white-space: nowrap; }
+  td.actions .grp { display: inline-flex; gap: .28rem; align-items: center; }
+  td.actions .grp a { display: inline-flex; }
+  td.actions .grp { display: inline-flex; gap: .28rem; }
   button, select {
     font: inherit; border-radius: 6px; border: 1px solid var(--line);
     background: var(--card); color: var(--fg);
@@ -68,6 +102,10 @@
   nav button { margin: 0; }
   nav button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
   .state { font-size: .72rem; font-weight: 600; padding: .14rem .5rem; border-radius: 999px; }
+  .state-cell { white-space: nowrap; }
+  .state-meta { font-size: .74rem; color: var(--muted); white-space: nowrap; }
+  .state-cell { white-space: nowrap; }
+  .state-meta { font-size: .74rem; color: var(--muted); white-space: nowrap; }
   .state.running { background: var(--okbg); color: var(--ok); }
   .state.stopped { background: var(--line); color: var(--muted); }
   .state.waiting, .state.backoff, .state.starting { background: var(--warnbg); color: var(--warn); }
@@ -86,14 +124,20 @@
   }
   .field .hint2 { grid-column: 2; font-size: .74rem; color: var(--muted); margin-top: -.3rem; }
   .dlg-actions { display: flex; justify-content: flex-end; gap: .4rem; margin-top: .9rem; }
-  .np { display: flex; align-items: center; gap: .5rem; margin-top: .25rem; }
-  .np img { width: 34px; height: 34px; border-radius: 4px; object-fit: cover; flex: 0 0 auto; }
-  .np-text { min-width: 0; }
+  .np { display: flex; align-items: center; gap: .55rem; }
+  .np img {
+    width: 38px; height: 38px; border-radius: 5px; object-fit: cover;
+    flex: 0 0 auto; background: var(--line);
+  }
+  /* min-width:0 is what lets the ellipsis actually kick in inside a flex row. */
+  .np-text { min-width: 0; flex: 1 1 auto; max-width: 17rem; }
   .np-title { font-size: .82rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .np-artist { font-size: .74rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .transport button { padding: .22rem .45rem; font-size: .9rem; line-height: 1; }
-  .vol { display: flex; align-items: center; gap: .35rem; margin-top: .3rem; }
-  .vol input[type=range] { width: 8rem; }
+  .transport { display: flex; gap: .2rem; flex: 0 0 auto; white-space: nowrap; }
+  .transport button { padding: .24rem .45rem; font-size: .9rem; line-height: 1; margin: 0; }
+  .vol { display: flex; align-items: center; gap: .4rem; margin-top: .35rem; }
+  .vol button { margin: 0; padding: .2rem .4rem; line-height: 1; }
+  .vol input[type=range] { width: 7.5rem; accent-color: var(--accent); }
   .vol span { font-size: .72rem; color: var(--muted); min-width: 2.4rem; }
   pre.logs {
     background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
@@ -104,31 +148,38 @@
 
 <main>
   <header>
-    <h1>Bluetooth Panel</h1>
+    <h1 id="pageTitle">Player Panel</h1>
+
     <nav>
-      <button id="tabDevices" class="active">Devices</button>
-      <button id="tabPlayers">Players</button>
+      <button id="tabPlayers" class="active">Players</button>
+      <button id="tabDevices">Devices</button>
     </nav>
-    <span style="flex:1 1 auto"></span>
-    <label class="muted devices-only">adapter
-      <select id="adapter"><option>…</option></select>
-    </label>
-    <label class="muted devices-only">for
-      <select id="duration">
-        <option value="5">5s</option>
-        <option value="10" selected>10s</option>
-        <option value="20">20s</option>
-        <option value="30">30s</option>
-      </select>
-    </label>
-    <button id="scan" class="primary devices-only">Scan for new devices</button>
-    <button id="playerSettings" class="players-only" hidden title="defaults for new players">⚙</button>
-    <button id="addPlayer" class="primary players-only" hidden>Add player</button>
+
+    <div class="head-actions">
+      <label class="muted devices-only" hidden>adapter
+        <select id="adapter"><option>…</option></select>
+      </label>
+      <label class="muted devices-only" hidden>for
+        <select id="duration">
+          <option value="5">5s</option>
+          <option value="10" selected>10s</option>
+          <option value="20">20s</option>
+          <option value="30">30s</option>
+        </select>
+      </label>
+      <button id="scan" class="primary devices-only" hidden>Scan for new devices</button>
+      <a id="snapwebLink" class="players-only" href="#" target="_blank" rel="noopener">
+        <button type="button" title="open Snapweb on the snapserver">Snapweb</button>
+      </a>
+      <button id="playerSettings" class="players-only" title="settings">⚙</button>
+      <button id="addPlayer" class="primary players-only">Add player</button>
+      <button id="themeToggle" title="theme">🌗</button>
+    </div>
   </header>
 
   <div id="notes"></div>
 
-  <section id="viewDevices">
+  <section id="viewDevices" hidden>
   <h2>Paired <span class="count" id="pairedCount"></span></h2>
   <div class="card">
     <table>
@@ -153,7 +204,7 @@
 
   </section>
 
-  <section id="viewPlayers" hidden>
+  <section id="viewPlayers">
     <h2>Snapcast players <span class="count" id="playerCount"></span></h2>
     <div class="card">
       <table>
@@ -244,7 +295,26 @@
           device's own name. Set it to just <code>{name}</code> to drop the marker.
         </div>
       </div>
-      <div id="settingsPreview" class="hint" style="margin:.2rem 0 0"></div>
+      <div id="settingsPreview" class="hint" style="margin:.2rem 0 .8rem"></div>
+
+      <div class="field">
+        <label for="fSnapHost">Snapserver</label>
+        <input type="text" id="fSnapHost" placeholder="leave empty to use this host">
+        <div class="hint2">Default for new players. Empty means whatever host you opened this page on.</div>
+      </div>
+      <div class="field">
+        <label for="fSnapPort">Audio port</label>
+        <input type="number" id="fSnapPort" min="1" max="65535">
+      </div>
+      <div class="field">
+        <label for="fSnapControl">Control port</label>
+        <input type="number" id="fSnapControl" min="1" max="65535">
+        <div class="hint2">JSON-RPC: now playing, transport, client naming. Separate listener from the audio port.</div>
+      </div>
+      <div class="field">
+        <label for="fSnapWeb">Snapweb port</label>
+        <input type="number" id="fSnapWeb" min="1" max="65535">
+      </div>
       <div id="settingsError" class="note err" style="display:none"></div>
       <div class="dlg-actions">
         <button type="button" id="settingsCancel">Cancel</button>
@@ -496,18 +566,20 @@
         ? `<span class="mac">${esc(p.node)}</span>` +
           (p.node_present === false ? ` <span class="badge">absent</span>` : "")
         : `<span class="muted">default sink</span>`;
-      const detail = p.detail ? ` <span class="muted">${esc(p.detail)}</span>` : "";
+      const detail = p.detail
+        ? `<div class="state-meta" title="${esc(p.detail)}">${esc(p.detail)}</div>` : "";
       const meta = p.running
-        ? ` <span class="muted">${secs(p.uptime)}</span>`
-        : (p.restarts ? ` <span class="muted">${p.restarts} restarts</span>` : "");
+        ? `<span class="state-meta"> ${secs(p.uptime)}</span>`
+        : (p.restarts ? `<span class="state-meta"> ${p.restarts} restarts</span>` : "");
 
       tr.innerHTML =
         `<td>${esc(p.name)}${p.mac ? ` <span class="badge on">BT</span>` : ""}` +
           `<div class="muted" style="font-size:.72rem">${sink}</div></td>` +
         `<td>${nowPlaying(p)}</td>` +
-        `<td><span class="state ${esc(p.state)}">${esc(p.state)}</span>${detail}${meta}` +
-          `<div class="muted" style="font-size:.72rem">${esc(p.server)}:${p.port}</div></td>` +
-        `<td class="actions">` +
+        `<td class="state-cell"><span class="state ${esc(p.state)}">${esc(p.state)}</span>${meta}` +
+          `${detail}` +
+          `<div class="state-meta">${esc(p.server)}:${p.port}</div></td>` +
+        `<td class="actions"><span class="grp">` +
           (p.running
             ? `<button data-do="stop">Stop</button><button data-do="restart">Restart</button>`
             : `<button data-do="start" class="primary">Start</button>`) +
@@ -515,7 +587,7 @@
           snapwebLink(p) +
           `<button data-do="edit">Edit</button>` +
           `<button data-do="delete" class="danger">Delete</button>` +
-        `</td>`;
+        `</span></td>`;
 
       tr.querySelectorAll("button[data-do]").forEach((b) =>
         b.addEventListener("click", () => playerAction(b.dataset.do, p)));
@@ -529,17 +601,22 @@
     }
   }
 
+  const full0 = (s) => [s.title, s.artist, s.album].filter(Boolean).join(" — ");
+
   function nowPlaying(p) {
     if (p.snapcast_error) return `<span class="muted">${esc(p.snapcast_error)}</span>`;
     const s = p.snapcast;
     if (!s) return `<span class="muted">not known to the snapserver yet</span>`;
 
     const art = s.art_url
-      ? `<img src="${esc(s.art_url)}" alt="" onerror="this.style.display='none'">` : "";
+      ? `<img src="${esc(s.art_url)}" alt="" title="${esc(full0(s))}" onerror="this.style.display='none'">` : "";
+    // The cells are narrow and the text is ellipsised, so the full strings go
+    // in title= -- hovering a truncated track name shows all of it.
+    const full = [s.title, s.artist, s.album].filter(Boolean).join(" — ");
     const title = s.title
-      ? `<div class="np-title">${esc(s.title)}</div>
-         <div class="np-artist">${esc(s.artist || s.album || "")}</div>`
-      : `<div class="np-artist">${esc(s.stream_id || "no stream")} — ${esc(s.stream_status || "idle")}</div>`;
+      ? `<div class="np-title" title="${esc(full)}">${esc(s.title)}</div>
+         <div class="np-artist" title="${esc(full)}">${esc(s.artist || s.album || "")}</div>`
+      : `<div class="np-artist" title="${esc(s.stream_id || "")}">${esc(s.stream_id || "no stream")} — ${esc(s.stream_status || "idle")}</div>`;
 
     // Only offer what this stream says it supports; the flags differ per stream
     // and change at runtime. A plain pipe stream gets no buttons at all.
@@ -566,13 +643,23 @@
     return `<div class="np">${art}<div class="np-text">${title}</div>${controls}</div>${vol}`;
   }
 
+  const defaultServer = () => snapDefaults.host || location.hostname;
+
   function snapwebLink(p) {
-    // Snapweb owns groups, stream assignment and every client on the server --
-    // deliberately more than this panel does. Link rather than duplicate.
+    // Snapweb lives in the header, since there is normally one server. A row
+    // only gets its own link when that player points somewhere else -- players
+    // each carry their own server, so that is possible, just unusual.
     const port = snapDefaults.web_port;
-    if (!p.server || !port) return "";
+    if (!p.server || !port || p.server === defaultServer()) return "";
     return `<a href="http://${esc(p.server)}:${port}/" target="_blank" rel="noopener">` +
-           `<button title="open this player's server in Snapweb">Snapweb</button></a>`;
+           `<button title="open ${esc(p.server)} in Snapweb">Snapweb</button></a>`;
+  }
+
+  function refreshSnapwebLink() {
+    const host = defaultServer();
+    const link = $("snapwebLink");
+    link.href = `http://${host}:${snapDefaults.web_port}/`;
+    link.querySelector("button").title = `open Snapweb on ${host}`;
   }
 
   async function transport(player, command) {
@@ -775,6 +862,10 @@
 
   function openSettings() {
     $("fBtTemplate").value = settings.bt_name_template;
+    $("fSnapHost").value = settings.snapserver_host || "";
+    $("fSnapPort").value = settings.snapserver_port;
+    $("fSnapControl").value = settings.snapserver_control_port;
+    $("fSnapWeb").value = settings.snapserver_web_port;
     $("settingsError").style.display = "none";
     previewTemplate();
     $("settingsDialog").showModal();
@@ -784,7 +875,13 @@
     event.preventDefault();
     const data = await call("/api/settings", {
       method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bt_name_template: $("fBtTemplate").value }),
+      body: JSON.stringify({
+        bt_name_template: $("fBtTemplate").value,
+        snapserver_host: $("fSnapHost").value.trim(),
+        snapserver_port: Number($("fSnapPort").value),
+        snapserver_control_port: Number($("fSnapControl").value),
+        snapserver_web_port: Number($("fSnapWeb").value),
+      }),
     });
     if (data.error) {
       const box = $("settingsError");
@@ -793,14 +890,24 @@
       return;
     }
     settings = data.settings;
+    snapDefaults = {
+      host: settings.snapserver_host,
+      port: settings.snapserver_port,
+      control_port: settings.snapserver_control_port,
+      web_port: settings.snapserver_web_port,
+    };
+    refreshSnapwebLink();
     $("settingsDialog").close();
-    setNotes({}, "defaults saved");
+    setNotes({}, "settings saved");
+    renderPlayers(lastPlayers);
   }
 
   // --- tabs --------------------------------------------------------------------
 
   function showTab(which) {
     const players = which === "players";
+    $("pageTitle").textContent = players ? "Player Panel" : "Bluetooth Panel";
+    document.title = players ? "Player Panel" : "Bluetooth Panel";
     $("viewDevices").hidden = players;
     $("viewPlayers").hidden = !players;
     $("tabDevices").classList.toggle("active", !players);
@@ -812,6 +919,28 @@
 
   $("tabDevices").addEventListener("click", () => showTab("devices"));
   $("tabPlayers").addEventListener("click", () => showTab("players"));
+  // Three states: system (no attribute, follows prefers-color-scheme), light,
+  // dark. Stored so a choice survives a reload.
+  const THEMES = ["system", "light", "dark"];
+  const THEME_ICON = { system: "🌗", light: "☀️", dark: "🌙" };
+
+  function applyTheme(theme) {
+    if (theme === "system") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", theme);
+    const btn = $("themeToggle");
+    btn.textContent = THEME_ICON[theme];
+    btn.title = `theme: ${theme} (click to change)`;
+    try { localStorage.setItem("bw-theme", theme); } catch (_) { /* private mode */ }
+  }
+
+  function currentTheme() {
+    try { return localStorage.getItem("bw-theme") || "system"; } catch (_) { return "system"; }
+  }
+
+  applyTheme(currentTheme());
+  $("themeToggle").addEventListener("click", () =>
+    applyTheme(THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length]));
+
   $("addPlayer").addEventListener("click", () => openDialog(null));
   $("playerSettings").addEventListener("click", openSettings);
   $("settingsForm").addEventListener("submit", saveSettings);
@@ -833,6 +962,7 @@
     const cfg = await call("/api/config");
     if (cfg.poll_seconds) pollMs = cfg.poll_seconds * 1000;
     if (cfg.snapserver) snapDefaults = cfg.snapserver;
+    refreshSnapwebLink();
     const st = await call("/api/settings");
     if (st.settings) settings = st.settings;
     await loadAdapters();

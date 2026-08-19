@@ -105,9 +105,18 @@ DEFAULTS = {
 
 
 # Panel-wide settings, editable from the web and stored next to the players.
-# The Bluetooth marker lives here rather than in the code so it can be changed
-# or removed without a rebuild -- "(BT)" is only the starting value.
-DEFAULT_SETTINGS = {"bt_name_template": "{name} (BT)"}
+# The environment only seeds them: once saved, the stored value wins, so a host
+# can be re-pointed at another snapserver without touching compose. The
+# Bluetooth marker lives here for the same reason -- "(BT)" is a starting value,
+# not something baked into the code.
+def _default_settings():
+    return {
+        "bt_name_template": "{name} (BT)",
+        "snapserver_host": SNAPSERVER_HOST,
+        "snapserver_port": SNAPSERVER_PORT,
+        "snapserver_control_port": SNAPSERVER_CONTROL_PORT,
+        "snapserver_web_port": SNAPSERVER_WEB_PORT,
+    }
 
 
 class SettingsError(ValueError):
@@ -115,11 +124,27 @@ class SettingsError(ValueError):
 
 
 def validate_settings(patch, current=None):
-    clean = dict(current or DEFAULT_SETTINGS)
+    defaults = _default_settings()
+    clean = dict(current or defaults)
     for key, value in (patch or {}).items():
-        if key not in DEFAULT_SETTINGS:
+        if key not in defaults:
             raise SettingsError("unknown setting %r" % key)
         clean[key] = value
+
+    host = str(clean.get("snapserver_host", "")).strip()
+    if host and not HOST_RE.fullmatch(host):
+        raise SettingsError("invalid snapserver address")
+    clean["snapserver_host"] = host
+
+    for key, label in (("snapserver_port", "port"),
+                       ("snapserver_control_port", "control port"),
+                       ("snapserver_web_port", "web port")):
+        try:
+            clean[key] = int(clean[key])
+        except (TypeError, ValueError):
+            raise SettingsError("%s must be a number" % label) from None
+        if not 1 <= clean[key] <= 65535:
+            raise SettingsError("%s must be between 1 and 65535" % label)
 
     template = str(clean["bt_name_template"]).strip()
     if "{name}" not in template:
@@ -599,7 +624,7 @@ class Supervisor:
         # Injected so players.py never imports the Bluetooth layer; keeps this
         # module testable with a plain lambda.
         self.connect_bluetooth = connect_bluetooth
-        self.settings = dict(DEFAULT_SETTINGS)
+        self.settings = _default_settings()
         self.load()
 
     # ---- persistence -------------------------------------------------------
@@ -613,7 +638,7 @@ class Supervisor:
         try:
             self.settings = validate_settings(stored.get("settings") or {})
         except SettingsError:
-            self.settings = dict(DEFAULT_SETTINGS)
+            self.settings = _default_settings()
         for entry in stored.get("players", []):
             try:
                 config = validate(entry)
@@ -726,10 +751,19 @@ class Supervisor:
             raise PlayerError("no such player")
         return player
 
+    def new_player_defaults(self):
+        """Seed values for a new player, from the live settings."""
+        return {
+            "server": self.settings["snapserver_host"] or DEFAULTS["server"],
+            "port": self.settings["snapserver_port"],
+            "control_port": self.settings["snapserver_control_port"],
+        }
+
     def create(self, config):
         with self._lock:
             names = {p.config["name"] for p in self._players.values()}
-            clean = validate(config, existing_names=names)
+            seeded = {**self.new_player_defaults(), **(config or {})}
+            clean = validate(seeded, existing_names=names)
             clean["id"] = uuid.uuid4().hex[:8]
             clean["instance"] = self._next_instance()
             player = Player(clean, self)

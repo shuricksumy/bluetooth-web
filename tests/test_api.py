@@ -580,6 +580,8 @@ def test_index_html_is_well_formed():
     for element_id in (
         "notes", "status", "live", "scan", "duration", "adapter",
         "pairedRows", "pairedEmpty", "pairedCount", "fBtTemplate", "playerSettings",
+        "pageTitle", "themeToggle", "snapwebLink",
+        "fSnapHost", "fSnapPort", "fSnapControl", "fSnapWeb",
         "foundRows", "foundEmpty", "foundCount", "showUnnamed",
     ):
         assert 'id="%s"' % element_id in page, element_id

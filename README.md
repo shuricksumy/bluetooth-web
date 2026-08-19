@@ -110,6 +110,7 @@ On **Ubuntu** you will also need `security_opt: [apparmor=unconfined]` — see
 | `BIND_HOST` | `0.0.0.0` | Listen address inside the container. |
 | `DBUS_SYSTEM_BUS_ADDRESS` | `unix:path=/run/dbus/system_bus_socket` | Where libdbus looks for the host bus. Change only if you mount the socket elsewhere. |
 | `SNAPSERVER_HOST` | _(empty)_ | Default Snapserver for new players. Empty means "whatever host you browsed the panel on". |
+
 | `SNAPSERVER_PORT` | `1704` | Default audio port. |
 | `SNAPSERVER_CONTROL_PORT` | `1705` | JSON-RPC port used for now-playing, transport and naming. A separate listener from the audio port, not derived from it. |
 | `SNAPSERVER_WEB_PORT` | `1780` | Snapweb, linked from each player row. |
@@ -257,7 +258,13 @@ every player running in here. Without that call all your players show up under
 one meaningless name.
 
 For anything beyond a single player — groups, stream assignment, clients this
-panel did not create — each row links to **Snapweb** on the server itself.
+panel did not create — the header links to **Snapweb** on the server itself. A
+row gets its own link only when that player points at a different server.
+
+The Snapserver address and its three ports are set under **⚙** as well as by
+environment variable: the environment seeds them, the saved settings win
+afterwards, so a host can be re-pointed without touching compose. The panel
+opens on the Players tab and remembers a light/dark/system theme choice.
 
 ### ⚠️ Bluetooth latency
 

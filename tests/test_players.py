@@ -463,3 +463,43 @@ def test_a_corrupt_settings_block_falls_back(tmp_path):
     path = tmp_path / "players.json"
     path.write_text('{"settings": {"bt_name_template": "broken"}, "players": []}')
     assert Supervisor(config_path=str(path)).settings["bt_name_template"] == "{name} (BT)"
+
+
+def test_snapserver_settings_are_web_editable(supervisor):
+    """Env only seeds them; the stored value wins afterwards."""
+    assert supervisor.new_player_defaults()["port"] == 1704
+
+    supervisor.update_settings({
+        "snapserver_host": "10.0.0.5", "snapserver_port": 1804,
+        "snapserver_control_port": 1805, "snapserver_web_port": 1880,
+    })
+    defaults = supervisor.new_player_defaults()
+    assert defaults == {"server": "10.0.0.5", "port": 1804, "control_port": 1805}
+
+    player = supervisor.create({"name": "Inherits", "mac": "5C:01:3B:63:E7:BA",
+                                "autostart": False})
+    assert player.config["server"] == "10.0.0.5"
+    assert player.config["control_port"] == 1805
+    # An explicit value still overrides the default.
+    other = supervisor.create({"name": "Explicit", "server": "10.0.0.9",
+                               "autostart": False})
+    assert other.config["server"] == "10.0.0.9"
+
+
+@pytest.mark.parametrize("bad,why", [
+    ({"snapserver_host": "not a host"}, "invalid snapserver"),
+    ({"snapserver_port": 0}, "port"),
+    ({"snapserver_control_port": 99999}, "control port"),
+    ({"snapserver_web_port": "abc"}, "web port"),
+])
+def test_bad_snapserver_settings_are_rejected(supervisor, bad, why):
+    with pytest.raises(players_mod.SettingsError) as err:
+        supervisor.update_settings(bad)
+    assert why.lower() in str(err.value).lower()
+
+
+def test_an_empty_snapserver_host_is_allowed(supervisor):
+    """Empty means "the host you browsed the panel on"."""
+    supervisor.update_settings({"snapserver_host": ""})
+    assert supervisor.settings["snapserver_host"] == ""
+    assert supervisor.new_player_defaults()["server"] == "127.0.0.1"

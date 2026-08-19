@@ -182,11 +182,13 @@ def api_config():
         auth=bool(ADMIN_PASSWORD),
         # Seeds the Add-player form. An empty host means the page falls back to
         # whatever it was browsed on.
+        # From the stored settings, not the environment: the environment only
+        # seeds them, and the web UI can change them afterwards.
         snapserver={
-            "host": players_mod.SNAPSERVER_HOST,
-            "port": players_mod.SNAPSERVER_PORT,
-            "control_port": players_mod.SNAPSERVER_CONTROL_PORT,
-            "web_port": players_mod.SNAPSERVER_WEB_PORT,
+            "host": supervisor.settings["snapserver_host"],
+            "port": supervisor.settings["snapserver_port"],
+            "control_port": supervisor.settings["snapserver_control_port"],
+            "web_port": supervisor.settings["snapserver_web_port"],
         },
     )
 
