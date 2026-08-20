@@ -251,6 +251,7 @@ def list_sinks():
                 "node": name,
                 "description": props.get("node.description") or name,
                 "bluetooth": name.startswith("bluez_output."),
+                "codec": props.get("api.bluez5.codec"),
                 "muted": _sink_muted(item),
             }
         )
@@ -324,6 +325,36 @@ def set_sink_volume(node, volume):
             subprocess.run(args, capture_output=True, timeout=10, env=_pw_env())
         except (OSError, subprocess.SubprocessError):
             return
+
+
+# The node reports the codec as an id: "sbc_xq", "aptx_hd". These are what the
+# profile descriptions call them, so the badge and the dropdown agree. mSBC and
+# CVSD are the headset ones -- worth showing precisely because seeing them is the
+# explanation for a speaker that suddenly sounds like a phone call.
+CODEC_LABELS = {
+    "sbc": "SBC",
+    "sbc_xq": "SBC-XQ",
+    "aac": "AAC",
+    "ldac": "LDAC",
+    "aptx": "aptX",
+    "aptx_hd": "aptX HD",
+    "aptx_ll": "aptX-LL",
+    "aptx_ll_duplex": "aptX-LL duplex",
+    "faststream": "FastStream",
+    "faststream_duplex": "FastStream duplex",
+    "lc3": "LC3",
+    "opus_05": "Opus",
+    "opus_05_duplex": "Opus duplex",
+    "msbc": "mSBC",
+    "cvsd": "CVSD",
+}
+
+
+def codec_label(raw):
+    """"sbc_xq" -> "SBC-XQ". Unknown codecs keep their own name."""
+    if not raw:
+        return None
+    return CODEC_LABELS.get(raw, raw.upper())
 
 
 def card_for_mac(mac):
@@ -977,16 +1008,20 @@ class Supervisor:
         return candidate
 
     def list(self, with_snapcast=True):
-        sinks = {s["node"] for s in list_sinks()}
+        sinks = {entry["node"]: entry for entry in list_sinks()}
         with self._lock:
             players = list(self._players.values())
 
         out = []
         for player in players:
             status = player.status()
+            sink = sinks.get(status["node"]) if status["node"] else None
             status["node_present"] = (
                 status["node"] in sinks if status["node"] else None
             )
+            # Which codec the link actually negotiated, not which one was asked
+            # for -- a speaker can refuse and fall back without saying so.
+            status["codec"] = codec_label((sink or {}).get("codec"))
             status["snapcast"] = None
             status["snapcast_error"] = None
             out.append(status)

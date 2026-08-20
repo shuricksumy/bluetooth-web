@@ -45,6 +45,7 @@ slightly out of step with everything else in the house.
 | ▶️ **See and control what is playing** | Cover art, title, artist, volume, play / pause / skip — per room. |
 | 🧭 **No node names to copy** | Pick the speaker; the audio device name is worked out for you. |
 | 🎚️ **Sound check** | A left/right test tone, and the Bluetooth codec (LDAC, aptX HD, SBC-XQ …) as a dropdown. |
+| 🏷️ **The codec, on the row** | Each Bluetooth player shows what its link actually negotiated — not what was asked for. |
 
 ## 🖥️ The two tabs
 

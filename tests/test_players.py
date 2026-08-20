@@ -770,3 +770,38 @@ def test_a_failing_pw_play_is_reported(tone, monkeypatch):
     with pytest.raises(PlayerError) as err:
         players_mod.play_test_tone(TONE_NODE, "both", seconds=0.1)
     assert "cannot connect to PipeWire" in str(err.value)
+
+
+def test_the_player_list_carries_the_negotiated_codec(supervisor, monkeypatch):
+    """The badge reports what the link settled on, not what was asked for."""
+    mac = "00:02:5B:00:FF:04"
+    node = node_for_mac(mac)
+    monkeypatch.setattr(players_mod, "list_sinks", lambda: [
+        {"id": 68, "node": node, "description": "DX5", "bluetooth": True,
+         "codec": "sbc_xq", "muted": False},
+    ])
+    make(supervisor, mac=mac, node=node)
+    listed = supervisor.list(with_snapcast=False)[0]
+    assert listed["codec"] == "SBC-XQ"
+    assert listed["node_present"] is True
+
+
+def test_a_player_with_no_sink_has_no_codec(supervisor, monkeypatch):
+    monkeypatch.setattr(players_mod, "list_sinks", list)
+    make(supervisor, mac="00:02:5B:00:FF:04",
+         node=node_for_mac("00:02:5B:00:FF:04"))
+    listed = supervisor.list(with_snapcast=False)[0]
+    assert listed["codec"] is None
+    assert listed["node_present"] is False
+
+
+@pytest.mark.parametrize("raw,shown", [
+    ("ldac", "LDAC"),
+    ("sbc_xq", "SBC-XQ"),
+    ("aptx_hd", "aptX HD"),
+    ("msbc", "mSBC"),          # a headset codec: seeing it is the diagnosis
+    ("something_new", "SOMETHING_NEW"),
+    (None, None),
+])
+def test_codec_labels(raw, shown):
+    assert players_mod.codec_label(raw) == shown

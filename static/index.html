@@ -151,6 +151,7 @@
     border: 1px solid var(--line); background: var(--bg); color: var(--fg); width: 100%;
   }
   .field .hint2 { grid-column: 2; font-size: .74rem; color: var(--muted); margin-top: -.3rem; }
+  .badge.codec { font-variant-numeric: tabular-nums; }
   .tone { display: flex; gap: .35rem; }
   .tone button { margin-left: 0; }
   .dlg-actions { display: flex; align-items: center; gap: .4rem; margin-top: .9rem; }
@@ -654,6 +655,9 @@
 
       tr.innerHTML =
         `<td>${esc(p.name)}${p.mac ? ` <span class="badge on">BT</span>` : ""}` +
+          // The negotiated codec, not the requested one. Only Bluetooth links
+          // have one, and only while they are connected.
+          (p.codec ? ` <span class="badge codec" title="negotiated Bluetooth codec">${esc(p.codec)}</span>` : "") +
           `<div class="sink" title="${esc(p.node || "default sink")}">${sink}</div></td>` +
         `<td>${nowPlaying(p)}</td>` +
         `<td class="state-cell"><span class="state ${esc(p.state)}">${esc(p.state)}</span>${meta}` +
