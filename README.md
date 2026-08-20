@@ -94,6 +94,8 @@ for its output to appear, and if the speaker later drops off, brings both back.
 
 </details>
 
+**Running more than one room?** The [Home Audio Stack](https://github.com/shuricksumy/home-audio-stack) has a [complete compose file](https://github.com/shuricksumy/home-audio-stack/tree/main/examples) with this panel alongside Music Assistant, the DACs and the LED strips.
+
 ## 🚀 Quick start
 
 ```yaml
