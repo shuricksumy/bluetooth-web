@@ -1,9 +1,8 @@
-<h1 align="center">bluetooth-web-snapclient</h1>
+<h1 align="center">🔊 bluetooth-web-snapclient</h1>
 
 <p align="center">
-  Pair a Bluetooth speaker from your browser — then run a synced
-  <a href="https://github.com/badaix/snapcast">Snapcast</a> player on it.
-  <br>No SSH, no <code>bluetoothctl</code>, no copying <code>bluez_output.*</code> node names into a compose file.
+  <b>Turn the Bluetooth speakers you already own into Hi-Fi multiroom players.</b><br>
+  Pair from your browser. Play in sync with every other room. No SSH, no config files.
 </p>
 
 <p align="center">
@@ -23,19 +22,39 @@
 
 ---
 
-## What it does
+## 🤔 The problem
 
-Two tabs, one container:
+You have a JBL on the shelf, headphones in a drawer, a portable speaker in the
+bathroom. Good speakers, already paid for — and completely outside your music
+system, because pairing a Bluetooth speaker to a headless Linux box means SSH,
+`bluetoothctl`, and then digging a name like `bluez_output.F8_5C_7D_75_D6_06.1`
+out of the audio stack and pasting it into a config file. For every speaker.
+Again after every reinstall.
+
+And once it *is* connected, it is still not a *room*: it plays on its own,
+slightly out of step with everything else in the house.
+
+## ✨ What you get
+
+|  | |
+| :-- | :-- |
+| 🖱️ **Pairing from a web page** | Scan, pair, connect, forget. The command line stays closed. |
+| 🏠 **Bluetooth speakers become rooms** | Each one joins Music Assistant as a synced [Snapcast](https://github.com/badaix/snapcast) player, next to your wired rooms. |
+| 🎧 **Several at once** | The JBL in the kitchen and headphones in the study, playing together or separately. |
+| 🔁 **It heals itself** | Turn a speaker off and on: it reconnects and its player comes back, on its own. |
+| ▶️ **See and control what is playing** | Cover art, title, artist, volume, play / pause / skip — per room. |
+| 🧭 **No node names to copy** | Pick the speaker; the audio device name is worked out for you. |
+
+## 🖥️ The two tabs
 
 | | |
 | :-- | :-- |
-| **Players** | Create, start, stop and supervise `snapclient` processes bound to a sink. Shows what is playing — title, artist, album art — with play / pause / next / previous and per-player volume. |
-| **Devices** | Scan, pair, trust, reconnect, re-pair and forget Bluetooth devices on the host. Pick between adapters (`hci0`, `hci1`, …). |
+| **Players** | Create, start and stop synced Snapcast players. Shows what is playing — title, artist, album art — with play / pause / next / previous and per-player volume. |
+| **Devices** | Scan, pair, trust, reconnect, re-pair and forget Bluetooth devices. Pick between adapters if you have more than one (`hci0`, `hci1`, …). |
 
-The point of putting them together: a `bluez_output` sink only exists while its
-speaker is connected. Starting a player **connects its Bluetooth device first**,
-waits for the sink, and if the speaker later drops off the player recovers by
-itself.
+They belong together because a Bluetooth speaker's audio output only exists while
+the speaker is connected. Starting a player **connects the speaker first**, waits
+for its output to appear, and if the speaker later drops off, brings both back.
 
 <table>
 <tr>
@@ -43,22 +62,21 @@ itself.
 <td width="50%"><img src="docs/devices-dark.png" alt="Devices tab, dark theme"></td>
 </tr>
 <tr>
-<td align="center"><em>Devices — light</em></td>
-<td align="center"><em>Devices — dark</em></td>
+<td align="center"><em>Devices — pair and manage speakers</em></td>
+<td align="center"><em>…in light or dark</em></td>
 </tr>
 <tr>
 <td width="50%"><img src="docs/players-light.png" alt="Players tab, light theme"></td>
 <td width="50%"><img src="docs/players-dark.png" alt="Players tab, dark theme"></td>
 </tr>
 <tr>
-<td align="center"><em>Players — light</em></td>
-<td align="center"><em>Players — dark</em></td>
+<td align="center"><em>Players — one row per room</em></td>
+<td align="center"><em>theme follows your system, or your choice</em></td>
 </tr>
 </table>
 
-Light, dark or follow-the-system, switchable in the corner and remembered.
-
-## Highlights
+<details>
+<summary><b>Under the hood</b>, for the curious (click to expand)</summary>
 
 - **The node name is derived for you.** A paired speaker's sink is
   `bluez_output.<MAC with underscores>.1`, prefilled when you add a player.
@@ -73,6 +91,8 @@ Light, dark or follow-the-system, switchable in the corner and remembered.
 - **Multi-arch, rebuilt weekly** for `linux/amd64` and `linux/arm64`, scanned with
   Trivy on every push.
 - **Optional HTTP Basic Auth** via `ADMIN_PASSWORD`.
+
+</details>
 
 ## 🚀 Quick start
 
