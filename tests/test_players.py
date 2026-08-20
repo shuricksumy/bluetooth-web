@@ -805,3 +805,24 @@ def test_a_player_with_no_sink_has_no_codec(supervisor, monkeypatch):
 ])
 def test_codec_labels(raw, shown):
     assert players_mod.codec_label(raw) == shown
+
+
+def test_codec_profiles_come_back_in_the_hosts_own_order(monkeypatch):
+    """Highest priority first: the top entry is what the host picks by itself."""
+    dump = [
+        {"id": 66, "info": {
+            "props": {"device.name": "bluez_card.00_02_5B_00_FF_04"},
+            "params": {
+                "Profile": [{"index": 11, "name": "a2dp-sink"}],
+                "EnumProfile": [
+                    {"index": 5, "name": "a2dp-sink-sbc", "priority": 20,
+                     "description": "High Fidelity Playback (A2DP Sink, codec SBC)"},
+                    {"index": 12, "name": "a2dp-sink-aptx_ll", "priority": 17,
+                     "description": "High Fidelity Playback (A2DP Sink, codec aptX-LL)"},
+                    {"index": 11, "name": "a2dp-sink", "priority": 23,
+                     "description": "High Fidelity Playback (A2DP Sink, codec LDAC)"},
+                ]}}},
+    ]
+    monkeypatch.setattr(players_mod, "_pw_dump", lambda: dump)
+    profiles = players_mod.codec_status("00:02:5B:00:FF:04")["profiles"]
+    assert [entry["codec"] for entry in profiles] == ["LDAC", "SBC", "aptX-LL"]

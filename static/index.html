@@ -813,6 +813,41 @@
 
   // --- sound check (test tone + codec) ----------------------------------------
 
+  // What each codec is actually for. `tag` keeps the dropdown scannable, `note`
+  // explains the trade-off once one is highlighted. The rule underneath all of
+  // them: bitrate is bought with delay, and in a synced house delay is the thing
+  // you have to pay for twice.
+  const CODEC_NOTES = {
+    "LDAC":       { tag: "highest bitrate",
+                    note: "The most data of anything here — up to 990 kbps — and the most delay with it. Best when this speaker plays on its own; expect to re-tune Latency (ms) if it has to line up with wired rooms." },
+    "aptX HD":    { tag: "high, less delay",
+                    note: "24-bit at ~576 kbps. Nearly LDAC's quality with noticeably less delay, which usually makes it the better choice for a room that plays in sync with others." },
+    "aptX":       { tag: "low delay",
+                    note: "~352 kbps, 16-bit. A modest step up from SBC with low delay. Solid, unexciting, reliable." },
+    "aptX-LL":    { tag: "lowest delay",
+                    note: "Same quality as plain aptX, but the lowest delay on offer (~40 ms). Pick it for video, or for a room that stubbornly refuses to line up." },
+    "SBC-XQ":     { tag: "better SBC",
+                    note: "Ordinary SBC pushed to ~450-550 kbps. Clearly better than plain SBC, supported by almost everything, and no exotic licensing on either end." },
+    "SBC":        { tag: "baseline",
+                    note: "The codec every A2DP device must support. Unremarkable, and the one to fall back to when something else stutters or drops out." },
+    "AAC":        { tag: "efficient",
+                    note: "~256 kbps and efficient with it, though how good it sounds depends on the encoder at each end. Usually the right pick for Apple hardware." },
+    "LC3":        { tag: "LE Audio",
+                    note: "LE Audio's codec: good quality at a low bitrate with low delay. Both ends have to support it." },
+    "FastStream": { tag: "two-way, low quality",
+                    note: "A two-way codec meant for headsets. Fine for calls, poor for music." },
+    "mSBC":       { tag: "headset, mono",
+                    note: "A hands-free codec: mono, 16 kHz. This is what makes a good speaker sound like a phone call — switch to an A2DP codec." },
+    "CVSD":       { tag: "headset, mono",
+                    note: "A hands-free codec: mono, 8 kHz. Voice only — switch to an A2DP codec for music." },
+  };
+
+  function codecNote(label) {
+    const entry = CODEC_NOTES[label];
+    return entry ? entry.note : "";
+  }
+
+
   let soundTarget = null;   // { label, toneUrl, mac }  -- a device or a player
 
   function soundNote(text, kind) {
@@ -869,17 +904,38 @@
     apply.hidden = false;
     const sel = $("fCodec");
     sel.replaceChildren();
+    // Highest priority first, as the host ranks them, so the top of the list is
+    // what it negotiates by itself.
     for (const profile of codec.profiles) {
-      const option = new Option(profile.codec, profile.index, profile.current, profile.current);
-      sel.appendChild(option);
+      const entry = CODEC_NOTES[profile.codec];
+      const label = entry ? `${profile.codec} — ${entry.tag}` : profile.codec;
+      sel.appendChild(new Option(label, profile.index, profile.current, profile.current));
     }
+    codecLabels = Object.fromEntries(codec.profiles.map((p) => [String(p.index), p.codec]));
+    codecHeadset = !!codec.headset;
+    describeCodec();
+  }
+
+  let codecLabels = {};
+  let codecHeadset = false;
+
+  function describeCodec() {
+    const option = $("fCodec").selectedOptions[0];
+    // defaultSelected still marks the codec the link is on, even after the user
+    // picks a different one in the list -- that is what makes "In use now" and
+    // the switching warning mutually exclusive without a second variable.
+    const inUse = option && option.defaultSelected;
     const bits = [];
-    // Prefer the profile's own label: the node reports "ldac", the list says "LDAC".
-    const current = codec.profiles.find((profile) => profile.current);
-    if (current || codec.active) bits.push(`Currently ${(current && current.codec) || codec.active}.`);
-    bits.push("Switching drops the link for a moment and restarts this device's players. " +
-              "Latency changes with the codec, so re-check the sync offset afterwards.");
-    if (codec.headset) bits.push("This device is on its headset profile — mono, and it will sound like a phone call.");
+    if (inUse) bits.push("In use now.");
+    const note = codecNote(codecLabels[$("fCodec").value]);
+    if (note) bits.push(note);
+    if (!inUse) {
+      bits.push("Switching drops the link for a moment, restarts this device's players, " +
+                "and changes the delay — re-check Latency (ms) afterwards.");
+    }
+    if (codecHeadset) {
+      bits.push("This device is on its headset profile right now — mono, and it will sound like a phone call.");
+    }
     $("codecHint").textContent = bits.join(" ");
   }
 
@@ -1176,6 +1232,7 @@
     openSoundForPlayer(player);
   });
   $("codecApply").addEventListener("click", applyCodec);
+  $("fCodec").addEventListener("change", describeCodec);
   document.querySelectorAll("#soundDialog .tone button").forEach((b) =>
     b.addEventListener("click", () => playTone(b.dataset.tone)));
 

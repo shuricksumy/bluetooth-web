@@ -412,10 +412,13 @@ def codec_status(mac):
                     "index": profile.get("index"),
                     "name": name,
                     "codec": _codec_label(profile),
+                    "priority": profile.get("priority") or 0,
                     "current": profile.get("index") == current.get("index"),
                 }
             )
-        profiles.sort(key=lambda entry: entry["codec"].lower())
+        # Highest priority first -- that ranking comes from the host, and the top
+        # entry is the one it negotiates by itself when the speaker connects.
+        profiles.sort(key=lambda entry: (-entry["priority"], entry["codec"].lower()))
         return {
             "available": bool(profiles),
             "card": card,

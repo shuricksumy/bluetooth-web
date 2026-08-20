@@ -217,9 +217,22 @@ are the channels the way round you think they are. If the sink is muted the pane
 says so rather than letting you conclude the hardware is dead.
 
 **Bluetooth codec.** The dropdown lists what your speaker and your host actually
-have in common — typically SBC, SBC-XQ, aptX, aptX HD and LDAC. A short list is a
-host packaging question (`libspa-0.2-bluetooth`, and WirePlumber's `bluez5.codecs`),
-not something the panel can widen.
+have in common — typically SBC, SBC-XQ, aptX, aptX HD and LDAC — ordered the way
+the host ranks them, so the top entry is the one it negotiates by itself. Each
+comes with a line on what it is for, because the choice is a trade, not a ladder:
+
+| | |
+| :-- | :-- |
+| **LDAC** | The most data (up to 990 kbps) and the most delay. Best for a speaker playing on its own. |
+| **aptX HD** | 24-bit, ~576 kbps, noticeably less delay. Usually the better pick for a room that plays *in sync* with others. |
+| **aptX** | ~352 kbps, low delay. Unexciting and reliable. |
+| **aptX-LL** | aptX quality at the lowest delay (~40 ms). For video, or a room that refuses to line up. |
+| **SBC-XQ** | Plain SBC at ~450–550 kbps. Clearly better than SBC and supported nearly everywhere. |
+| **SBC** | The baseline every A2DP device must support. What to fall back to when something stutters. |
+| **mSBC / CVSD** | Not music codecs — mono hands-free. Seeing one here explains a speaker that sounds like a phone call. |
+
+A short list is a host packaging question (`libspa-0.2-bluetooth`, and
+WirePlumber's `bluez5.codecs`), not something the panel can widen.
 
 Two things to know before you switch:
 
