@@ -125,8 +125,15 @@
   .state { font-size: .72rem; font-weight: 600; padding: .14rem .5rem; border-radius: 999px; }
   .state-cell { white-space: nowrap; }
   .state-meta { font-size: .74rem; color: var(--muted); white-space: nowrap; }
-  .state-cell { white-space: nowrap; }
-  .state-meta { font-size: .74rem; color: var(--muted); white-space: nowrap; }
+  /* The detail line is free text from the supervisor, and the useful messages are
+     the long ones -- "sink bluez_output.F8_5C_7D_75_D6_06.1 is not present (is the
+     device connected?)" is wider than the rest of the table put together, which
+     forced a horizontal scrollbar onto every row. Clamp it and let title= carry
+     the full text on hover, the same way the track names work. */
+  .state-detail {
+    display: block; max-width: min(18rem, 40vw);
+    overflow: hidden; text-overflow: ellipsis;
+  }
   .state.running { background: var(--okbg); color: var(--ok); }
   .state.stopped { background: var(--line); color: var(--muted); }
   .state.waiting, .state.backoff, .state.starting { background: var(--warnbg); color: var(--warn); }
@@ -605,7 +612,7 @@
           (p.node_present === false ? ` <span class="badge">absent</span>` : "")
         : `<span class="muted">default sink</span>`;
       const detail = p.detail
-        ? `<div class="state-meta" title="${esc(p.detail)}">${esc(p.detail)}</div>` : "";
+        ? `<div class="state-meta state-detail" title="${esc(p.detail)}">${esc(p.detail)}</div>` : "";
       const meta = p.running
         ? `<span class="state-meta"> ${secs(p.uptime)}</span>`
         : (p.restarts ? `<span class="state-meta"> ${p.restarts} restarts</span>` : "");
