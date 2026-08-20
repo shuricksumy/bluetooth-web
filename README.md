@@ -44,6 +44,7 @@ slightly out of step with everything else in the house.
 | 🔁 **It heals itself** | Turn a speaker off and on: it reconnects and its player comes back, on its own. |
 | ▶️ **See and control what is playing** | Cover art, title, artist, volume, play / pause / skip — per room. |
 | 🧭 **No node names to copy** | Pick the speaker; the audio device name is worked out for you. |
+| 🎚️ **Sound check** | A left/right test tone, and the Bluetooth codec (LDAC, aptX HD, SBC-XQ …) as a dropdown. |
 
 ## 🖥️ The two tabs
 
@@ -82,6 +83,12 @@ for its output to appear, and if the speaker later drops off, brings both back.
   `bluez_output.<MAC with underscores>.1`, prefilled when you add a player.
 - **Self-healing.** `snapclient` does *not* exit when its sink disappears — it sits
   there silently — so a watchdog restarts the player and reconnects the device.
+- **And when the sink comes back without the player.** A sink that goes away and
+  returns takes the stream with it: WirePlumber moves the player to the default
+  sink and leaves it there, under a node that exists again and a process that
+  never died. Everything reads healthy and the room is silent. So the watchdog
+  also compares where the audio is actually linked against where it was aimed,
+  and restarts the player when they differ.
 - **Honest failure.** No adapter, no `bluetoothd`, no D-Bus socket or an AppArmor
   denial each produce a specific message, not a spinner.
 - **Cheap polling.** The device list costs four D-Bus property reads and never
@@ -194,6 +201,36 @@ fills in the rest:
 | PipeWire buffer | `1024/48000` for Bluetooth, `2048/192000` otherwise |
 | ALSA bridge | on — copes with a sink changing sample rate under it |
 
+### 🎚️ Sound check
+
+**Devices → Sound**, or **Edit → Sound check** on a player. Two things live here.
+
+<p align="center">
+  <img src="docs/sound-check.png" width="72%" alt="The sound check dialog: left/right/both test tone buttons and a Bluetooth codec dropdown showing LDAC">
+</p>
+
+**Test tone.** A short beep straight into that speaker's own sink — left, right,
+or both. It mixes with whatever is playing, so nothing has to be stopped, and it
+answers the questions a player cannot: does this speaker make a sound at all, and
+are the channels the way round you think they are. If the sink is muted the panel
+says so rather than letting you conclude the hardware is dead.
+
+**Bluetooth codec.** The dropdown lists what your speaker and your host actually
+have in common — typically SBC, SBC-XQ, aptX, aptX HD and LDAC. A short list is a
+host packaging question (`libspa-0.2-bluetooth`, and WirePlumber's `bluez5.codecs`),
+not something the panel can widen.
+
+Two things to know before you switch:
+
+- **It renegotiates the link.** The sink is destroyed and rebuilt, so the players
+  on that device are stopped and started again around the switch. Takes about a
+  second.
+- **Latency changes with the codec.** LDAC buys quality and spends delay; aptX-LL
+  does the opposite. Re-check the player's *Latency (ms)* afterwards.
+
+If a speaker ends up on its **headset** profile — mono, and it sounds like a phone
+call — the panel flags it here, because nothing else will.
+
 ### ⚠️ Bluetooth latency
 
 A2DP adds roughly **150–250 ms**. Against wired rooms a Bluetooth speaker will be
@@ -262,6 +299,8 @@ Every route returns JSON. `<mac>` must match the pattern above or you get a `400
 | `POST` | `/api/players/<id>/control/{play,pause,next,previous}` | Transport, where the stream allows it. |
 | `POST` | `/api/players/<id>/volume` | `{"percent":50}` or `{"muted":true}`. |
 | `GET` | `/api/players/<id>/logs` | Last 200 lines. |
+| `POST` | `/api/players/<id>/test/{left,right,both}` · `/api/devices/<mac>/test/{…}` | Play the test tone. |
+| `GET`/`POST` | `/api/devices/<mac>/codec` | Read the codec list / switch it with `{"index": 6}`. |
 | `GET` | `/api/sinks` | PipeWire sinks available now. |
 | `GET`/`PATCH` | `/api/settings` | Panel settings. |
 | `GET` | `/api/snapcast/stale` · `DELETE /api/snapcast/client/<id>` | Forget clients nothing uses. |

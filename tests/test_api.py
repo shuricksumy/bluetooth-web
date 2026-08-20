@@ -837,3 +837,90 @@ def test_a_stopped_player_shows_no_transport_or_track():
     assert 'not connected to the snapserver' in page
     # The reset has to come before the transport controls are built.
     assert page.index("if (!p.running) {") < page.index('s.can_control')
+
+
+# ---- sound check: test tone and codec ---------------------------------------
+
+
+def test_the_test_tone_route_reaches_the_sink(player_client, monkeypatch):
+    players_mod = sys.modules["players"]
+    played = []
+    monkeypatch.setattr(
+        players_mod, "play_test_tone",
+        lambda node, channel: played.append((node, channel))
+        or {"node": node, "channel": channel, "seconds": 1.2, "muted": False},
+    )
+    res = player_client.post("/api/devices/AA:BB:CC:DD:EE:01/test/left")
+    assert res.status_code == 200
+    assert res.get_json()["test"]["channel"] == "left"
+    assert played == [("bluez_output.AA_BB_CC_DD_EE_01.1", "left")]
+
+
+def test_the_test_tone_route_validates_the_mac(player_client):
+    res = player_client.post("/api/devices/not-a-mac/test/left")
+    assert res.status_code == 400
+    assert "invalid MAC" in res.get_json()["error"]
+
+
+def test_a_tone_on_an_absent_sink_is_a_clean_error(player_client):
+    """list_sinks is empty in this fixture, so nothing is present."""
+    res = player_client.post("/api/devices/AA:BB:CC:DD:EE:01/test/both")
+    assert res.status_code == 400
+    assert "is not present" in res.get_json()["error"]
+
+
+def test_a_player_can_be_tested_by_id(player_client, monkeypatch):
+    players_mod = sys.modules["players"]
+    monkeypatch.setattr(
+        players_mod, "play_test_tone",
+        lambda node, channel: {"node": node, "channel": channel,
+                               "seconds": 1.2, "muted": None},
+    )
+    player = player_client.post("/api/players", json={
+        "name": "Kitchen", "mac": "5C:01:3B:63:E7:BA", "autostart": False,
+    }).get_json()["player"]
+
+    res = player_client.post("/api/players/%s/test/right" % player["id"])
+    assert res.status_code == 200
+    assert res.get_json()["test"]["node"] == "bluez_output.5C_01_3B_63_E7_BA.1"
+
+
+def test_start_is_still_an_action_not_a_channel(player_client):
+    """/api/players/<id>/test/<channel> must not shadow the action route."""
+    player = player_client.post("/api/players", json={
+        "name": "Routing", "mac": "5C:01:3B:63:E7:BA", "autostart": False,
+    }).get_json()["player"]
+    assert player_client.post("/api/players/%s/stop" % player["id"]).status_code == 200
+    assert player_client.post("/api/players/%s/nonsense" % player["id"]).status_code == 404
+
+
+def test_codec_status_over_http(player_client, monkeypatch):
+    players_mod = sys.modules["players"]
+    monkeypatch.setattr(players_mod, "codec_status", lambda mac: {
+        "available": True, "active": "ldac", "headset": False,
+        "profiles": [{"index": 11, "name": "a2dp-sink", "codec": "LDAC",
+                      "current": True}],
+    })
+    body = player_client.get("/api/devices/AA:BB:CC:DD:EE:01/codec").get_json()
+    assert body["codec"]["active"] == "ldac"
+    assert body["codec"]["profiles"][0]["codec"] == "LDAC"
+
+
+def test_switching_codec_needs_a_profile_number(player_client):
+    res = player_client.post("/api/devices/AA:BB:CC:DD:EE:01/codec", json={})
+    assert res.status_code == 400
+    assert "index" in res.get_json()["error"]
+
+
+def test_switching_codec_reports_what_it_did(player_client, monkeypatch):
+    app_module = sys.modules["app"]
+    calls = []
+    monkeypatch.setattr(
+        app_module.supervisor, "switch_codec",
+        lambda mac, index: calls.append((mac, index)) or {"active": "sbc_xq"},
+    )
+    res = player_client.post("/api/devices/AA:BB:CC:DD:EE:01/codec",
+                             json={"index": 6})
+    assert res.status_code == 200
+    assert res.get_json()["codec"]["active"] == "sbc_xq"
+    assert calls == [("AA:BB:CC:DD:EE:01", 6)]

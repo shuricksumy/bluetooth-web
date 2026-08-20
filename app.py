@@ -280,6 +280,47 @@ def api_player_action(player_id, action):
     return jsonify(ok=True, players=supervisor.list())
 
 
+@app.post("/api/players/<player_id>/test/<channel>")
+def api_player_test(player_id, channel):
+    """Play a test tone into this player's sink. Mixes with whatever is playing."""
+    player = supervisor.get(player_id)
+    result = players_mod.play_test_tone(player.config.get("node"), channel)
+    return jsonify(ok=True, test=result)
+
+
+@app.post("/api/devices/<mac>/test/<channel>")
+def api_device_test(mac, channel):
+    """The same tone, aimed at a paired device -- no player needed."""
+    mac, bad = mac_or_400(mac)
+    if bad:
+        return bad
+    result = players_mod.play_test_tone(players_mod.node_for_mac(mac), channel)
+    return jsonify(ok=True, test=result)
+
+
+@app.get("/api/devices/<mac>/codec")
+def api_device_codec(mac):
+    mac, bad = mac_or_400(mac)
+    if bad:
+        return bad
+    return jsonify(ok=True, codec=players_mod.codec_status(mac))
+
+
+@app.post("/api/devices/<mac>/codec")
+def api_set_device_codec(mac):
+    """Switch the A2DP codec, stopping and restarting this device's players."""
+    mac, bad = mac_or_400(mac)
+    if bad:
+        return bad
+    body = request.get_json(silent=True) or {}
+    try:
+        index = int(body["index"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify(ok=False, error="index must be a codec profile number"), 400
+    codec = supervisor.switch_codec(mac, index)
+    return jsonify(ok=True, codec=codec, players=supervisor.list())
+
+
 @app.post("/api/players/<player_id>/control/<command>")
 def api_player_control(player_id, command):
     """Transport control. Snapcast has no "stop" -- pause is the stop.

@@ -18,13 +18,17 @@ snapclient-per-container approach survives a panel restart; this one does not.
 """
 
 import json
+import math
 import os
 import re
 import shutil
+import struct
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
+import wave
 from collections import deque
 
 import snapctl
@@ -34,6 +38,7 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "players.json")
 
 SNAPCLIENT = os.environ.get("SNAPCLIENT", "snapclient")
 PW_DUMP = os.environ.get("PW_DUMP", "pw-dump")
+PW_PLAY = os.environ.get("PW_PLAY", "pw-play")
 WPCTL = os.environ.get("WPCTL", "wpctl")
 
 # Same backoff shape as entrypoint.sh: a session that stayed up for a while is
@@ -55,6 +60,28 @@ NODE_WAIT_SECONDS = 20.0
 # restart re-runs the readiness step, which reconnects the Bluetooth device.
 HEALTH_INTERVAL = 3.0
 SINK_GRACE = 15.0
+
+# The other half of the watchdog. A sink that disappears and comes back -- a
+# codec switch, a speaker power-cycled -- does not take the player with it:
+# WirePlumber moves the stream to the default sink and never moves it back, even
+# though the node returns under the same name. Verified on real hardware, and it
+# is worse than a dead player because everything looks healthy: the process is
+# up, the sink exists, the panel says "running", and the speaker is silent while
+# the audio comes out of whatever the default happens to be. So compare where
+# the stream is actually linked against where it was aimed.
+MISROUTE_GRACE = 10.0
+
+# A codec switch renegotiates the A2DP link, so the sink is destroyed and built
+# again. How long to wait for it to come back before restarting the players.
+CODEC_SETTLE_SECONDS = 10.0
+
+# The test tone. Short, quiet enough not to startle anyone, and one channel at a
+# time so it answers "are the speakers the right way round?".
+TONE_SECONDS = 1.2
+TONE_HZ = 440.0
+TONE_AMPLITUDE = 0.3
+TONE_RATE = 48000
+TONE_CHANNELS = ("left", "right", "both")
 
 LOG_LINES = 200
 
@@ -185,11 +212,11 @@ def _pw_env():
     return env
 
 
-def list_sinks():
-    """Audio sinks PipeWire currently exposes, newest state each call.
+def _pw_dump():
+    """Every object PipeWire knows about, or [] when it cannot be reached.
 
-    Best effort: no PipeWire socket means no sinks, not an error -- the panel
-    still lists players, it just cannot pre-validate their nodes.
+    Best effort by design: no PipeWire socket means no sinks, not an error --
+    the panel still lists players, it just cannot pre-validate their nodes.
     """
     if not shutil.which(PW_DUMP):
         return []
@@ -205,11 +232,13 @@ def list_sinks():
         objects = json.loads(raw.stdout or "[]")
     except ValueError:
         return []
+    return [item for item in objects if isinstance(item, dict)]
 
+
+def list_sinks():
+    """Audio sinks PipeWire currently exposes, newest state each call."""
     sinks = []
-    for item in objects:
-        if not isinstance(item, dict):
-            continue
+    for item in _pw_dump():
         props = (item.get("info") or {}).get("props") or {}
         if props.get("media.class") != "Audio/Sink":
             continue
@@ -222,14 +251,62 @@ def list_sinks():
                 "node": name,
                 "description": props.get("node.description") or name,
                 "bluetooth": name.startswith("bluez_output."),
+                "muted": _sink_muted(item),
             }
         )
     sinks.sort(key=lambda s: s["node"])
     return sinks
 
 
+def _sink_muted(item):
+    """Whether a sink is muted, when PipeWire says -- None when it does not."""
+    props = ((item.get("info") or {}).get("params") or {}).get("Props") or []
+    for entry in props:
+        if isinstance(entry, dict) and "mute" in entry:
+            return bool(entry["mute"])
+    return None
+
+
 def sink_present(node):
     return any(s["node"] == node for s in list_sinks())
+
+
+def stream_sink_for(node):
+    """The sink a stream aimed at `node` is *actually* linked to.
+
+    snapclient asks for its sink with PIPEWIRE_NODE, which lands on the stream
+    as target.object -- and that value stays correct even when the stream has
+    been moved somewhere else, so it identifies the player's stream but says
+    nothing about where the audio goes. The links do.
+
+    Returns None when there is nothing to compare: no PipeWire, no stream yet,
+    no links. Callers must treat that as "don't know", not as "wrong sink".
+    """
+    objects = _pw_dump()
+    if not objects:
+        return None
+
+    names = {}
+    streams = set()
+    for item in objects:
+        props = (item.get("info") or {}).get("props") or {}
+        if props.get("node.name"):
+            names[item.get("id")] = props["node.name"]
+        if (
+            props.get("media.class") == "Stream/Output/Audio"
+            and props.get("target.object") == node
+        ):
+            streams.add(item.get("id"))
+    if not streams:
+        return None
+
+    for item in objects:
+        info = item.get("info") or {}
+        if info.get("output-node-id") in streams:
+            target = names.get(info.get("input-node-id"))
+            if target:
+                return target
+    return None
 
 
 def set_sink_volume(node, volume):
@@ -247,6 +324,190 @@ def set_sink_volume(node, volume):
             subprocess.run(args, capture_output=True, timeout=10, env=_pw_env())
         except (OSError, subprocess.SubprocessError):
             return
+
+
+def card_for_mac(mac):
+    """The PipeWire device object a paired Bluetooth speaker shows up as."""
+    return "bluez_card.%s" % mac.upper().replace(":", "_")
+
+
+def _codec_label(profile):
+    """"High Fidelity Playback (A2DP Sink, codec LDAC)" -> "LDAC".
+
+    The description is the only reliable source: the profile for whichever codec
+    the host ranks highest is named plain `a2dp-sink`, not `a2dp-sink-ldac`, so
+    the name alone cannot tell you which codec it is.
+    """
+    description = profile.get("description") or ""
+    if "codec " in description:
+        return description.split("codec ", 1)[1].strip().rstrip(")").strip()
+    name = profile.get("name") or ""
+    if name.startswith("a2dp-sink-"):
+        return name[len("a2dp-sink-"):].upper()
+    return name or "unknown"
+
+
+def codec_status(mac):
+    """Which A2DP codecs this speaker and this host have in common.
+
+    The list is an intersection of three things -- what the speaker advertises,
+    what the host's libspa-0.2-bluetooth was built with, and what WirePlumber is
+    configured to offer -- so a short list is a host packaging question, not
+    something the panel can fix.
+    """
+    card = card_for_mac(mac)
+    node = node_for_mac(mac)
+    objects = _pw_dump()
+
+    active = None
+    for item in objects:
+        props = (item.get("info") or {}).get("props") or {}
+        if props.get("node.name") == node:
+            active = props.get("api.bluez5.codec")
+
+    for item in objects:
+        props = (item.get("info") or {}).get("props") or {}
+        if props.get("device.name") != card:
+            continue
+        params = (item.get("info") or {}).get("params") or {}
+        current = (params.get("Profile") or [{}])[0]
+        profiles = []
+        for profile in params.get("EnumProfile") or []:
+            name = str(profile.get("name") or "")
+            if not name.startswith("a2dp-sink"):
+                continue
+            profiles.append(
+                {
+                    "index": profile.get("index"),
+                    "name": name,
+                    "codec": _codec_label(profile),
+                    "current": profile.get("index") == current.get("index"),
+                }
+            )
+        profiles.sort(key=lambda entry: entry["codec"].lower())
+        return {
+            "available": bool(profiles),
+            "card": card,
+            "card_id": item.get("id"),
+            "active": active,
+            "current_index": current.get("index"),
+            # A speaker that also does hands-free can land on the headset
+            # profile, where it is mono at 8 or 16 kHz. That is the "why does
+            # this sound like a phone call" case, and it is worth saying so.
+            "headset": str(current.get("name") or "").startswith("headset"),
+            "profiles": profiles,
+        }
+
+    return {
+        "available": False,
+        "card": card,
+        "card_id": None,
+        "active": active,
+        "current_index": None,
+        "headset": False,
+        "profiles": [],
+    }
+
+
+def set_codec(mac, index):
+    """Switch a speaker's A2DP codec by selecting its PipeWire card profile."""
+    status = codec_status(mac)
+    if not status["available"]:
+        raise PlayerError(
+            "no A2DP codecs listed for %s -- is the device connected?" % mac
+        )
+    if index not in [profile["index"] for profile in status["profiles"]]:
+        raise PlayerError("no such codec profile for %s" % mac)
+    if not shutil.which(WPCTL):
+        raise PlayerError("wpctl is not available in this container")
+    try:
+        done = subprocess.run(
+            [WPCTL, "set-profile", str(status["card_id"]), str(index)],
+            capture_output=True, text=True, timeout=15, env=_pw_env(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PlayerError("cannot run wpctl: %s" % exc)
+    if done.returncode != 0:
+        detail = (done.stderr or done.stdout or "").strip().splitlines()
+        raise PlayerError(detail[-1] if detail else "wpctl refused the profile")
+    return status
+
+
+def _write_tone(path, channel, seconds):
+    """A sine burst in one channel, faded at both ends so it does not click."""
+    frames = int(TONE_RATE * seconds)
+    fade = max(1, int(TONE_RATE * 0.02))
+    samples = bytearray()
+    for i in range(frames):
+        envelope = min(1.0, i / fade, (frames - i) / fade)
+        value = int(
+            32767 * TONE_AMPLITUDE * envelope
+            * math.sin(2 * math.pi * TONE_HZ * i / TONE_RATE)
+        )
+        left = value if channel in ("left", "both") else 0
+        right = value if channel in ("right", "both") else 0
+        samples += struct.pack("<hh", left, right)
+    with wave.open(path, "wb") as handle:
+        handle.setnchannels(2)
+        handle.setsampwidth(2)
+        handle.setframerate(TONE_RATE)
+        handle.writeframes(bytes(samples))
+
+
+def play_test_tone(node, channel="both", seconds=TONE_SECONDS):
+    """Play a short tone into one sink and report what happened.
+
+    Answers the two questions a player cannot: does this speaker make a sound at
+    all, and are its channels the way round you think they are.
+    """
+    if channel not in TONE_CHANNELS:
+        raise PlayerError("channel must be one of: %s" % ", ".join(TONE_CHANNELS))
+    if not node:
+        raise PlayerError("this player has no output sink to test")
+
+    sink = next((entry for entry in list_sinks() if entry["node"] == node), None)
+    if sink is None:
+        # Not a nicety: pw-play exits 0 after quietly playing to the *default*
+        # sink when its target does not exist. Verified on real hardware -- so
+        # without this check a test would sound from the wrong speaker, or from
+        # nowhere at all, and still report success.
+        raise PlayerError("sink %s is not present (is the device connected?)" % node)
+    if not shutil.which(PW_PLAY):
+        raise PlayerError("pw-play is not available in this container")
+
+    handle, path = tempfile.mkstemp(prefix="tone-", suffix=".wav")
+    os.close(handle)
+    try:
+        _write_tone(path, channel, seconds)
+        env = _pw_env()
+        env["PIPEWIRE_NODE"] = node
+        try:
+            done = subprocess.run(
+                [PW_PLAY, path], capture_output=True, text=True,
+                timeout=seconds + 10, env=env,
+            )
+        except subprocess.TimeoutExpired:
+            raise PlayerError("pw-play did not finish -- is the sink stuck?")
+        except OSError as exc:
+            raise PlayerError("cannot run pw-play: %s" % exc)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+    if done.returncode != 0:
+        detail = (done.stderr or done.stdout or "").strip().splitlines()
+        raise PlayerError(detail[-1] if detail else "pw-play failed")
+
+    return {
+        "node": node,
+        "channel": channel,
+        "seconds": seconds,
+        # A muted sink plays a perfectly successful silent tone, which looks
+        # exactly like broken hardware unless the panel says so.
+        "muted": sink.get("muted"),
+    }
 
 
 def validate(config, existing_names=()):
@@ -508,13 +769,20 @@ class Player:
                 self.detail = ""
 
     def _watch(self, proc):
-        """Wait for the child to exit, restarting it if its sink goes away."""
+        """Wait for the child to exit, restarting it if its output goes wrong.
+
+        Two ways it goes wrong: the sink disappears, or the sink is there and
+        the player has been moved off it. Both leave a process that is up and
+        making no sound, so neither shows up as an exit.
+        """
         node = self.config.get("node")
         absent_since = None
+        misrouted_since = None
         while proc.poll() is None:
             if not self.desired:
                 return
             if node and not sink_present(node):
+                misrouted_since = None
                 absent_since = absent_since or time.time()
                 gone = time.time() - absent_since
                 if gone >= SINK_GRACE:
@@ -529,11 +797,33 @@ class Player:
                     return
                 with self._lock:
                     self.detail = "sink missing for %ds" % int(gone)
-            elif absent_since is not None:
-                absent_since = None
-                self.log("sink %s is back" % node)
-                with self._lock:
-                    self.detail = ""
+            else:
+                if absent_since is not None:
+                    absent_since = None
+                    self.log("sink %s is back" % node)
+                    with self._lock:
+                        self.detail = ""
+                actual = stream_sink_for(node) if node else None
+                if actual is not None and actual != node:
+                    misrouted_since = misrouted_since or time.time()
+                    wrong = time.time() - misrouted_since
+                    if wrong >= MISROUTE_GRACE:
+                        self.log(
+                            "output is going to %s instead of %s -- restarting "
+                            "the player" % (actual, node)
+                        )
+                        with self._lock:
+                            self.state = "waiting"
+                            self.detail = "output moved to %s" % actual
+                        self._terminate(proc)
+                        return
+                    with self._lock:
+                        self.detail = "output is on %s, not %s" % (actual, node)
+                elif misrouted_since is not None:
+                    misrouted_since = None
+                    self.log("output is back on %s" % node)
+                    with self._lock:
+                        self.detail = ""
             self._wake.wait(timeout=HEALTH_INTERVAL)
             if not self.desired:
                 return
@@ -743,6 +1033,36 @@ class Supervisor:
                     status["snapcast"]["name"] = player.config["name"]
                 except snapctl.SnapcastError as exc:
                     player.log("could not set the snapserver name: %s" % exc)
+
+    def switch_codec(self, mac, index):
+        """Change a speaker's A2DP codec, carrying its players across.
+
+        Switching renegotiates the A2DP link: the sink node is destroyed and
+        rebuilt under the same name. A snapclient that is running while that
+        happens gets moved to the default sink and stays there -- the watchdog
+        would eventually notice, but doing it deliberately is quicker and does
+        not leave a room silent in the meantime. So stop, switch, wait for the
+        sink, start again.
+        """
+        node = node_for_mac(mac)
+        with self._lock:
+            affected = [
+                player for player in self._players.values()
+                if player.config.get("node") == node and player.desired
+            ]
+        for player in affected:
+            player.stop()
+        try:
+            set_codec(mac, index)
+        finally:
+            # Even a refused switch can have torn the link down, so the players
+            # come back either way.
+            deadline = time.time() + CODEC_SETTLE_SECONDS
+            while time.time() < deadline and not sink_present(node):
+                time.sleep(1.0)
+            for player in affected:
+                player.start()
+        return codec_status(mac)
 
     def get(self, player_id):
         with self._lock:

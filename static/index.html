@@ -151,6 +151,8 @@
     border: 1px solid var(--line); background: var(--bg); color: var(--fg); width: 100%;
   }
   .field .hint2 { grid-column: 2; font-size: .74rem; color: var(--muted); margin-top: -.3rem; }
+  .tone { display: flex; gap: .35rem; }
+  .tone button { margin-left: 0; }
   .dlg-actions { display: flex; align-items: center; gap: .4rem; margin-top: .9rem; }
   .dlg-actions .spacer { flex: 1 1 auto; }
   .np { display: flex; align-items: center; gap: .55rem; }
@@ -314,6 +316,7 @@
       <div id="dialogError" class="note err" style="display:none"></div>
       <div class="dlg-actions">
         <button type="button" id="dialogDelete" class="danger-solid" hidden>Delete player</button>
+        <button type="button" id="dialogSound" hidden>Sound check</button>
         <span class="spacer"></span>
         <button type="button" id="dialogCancel">Cancel</button>
         <button type="submit" class="primary" id="dialogSave">Save</button>
@@ -358,6 +361,36 @@
         <button type="submit" class="primary">Save</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="soundDialog">
+    <h3 id="soundTitle">Sound check</h3>
+
+    <div class="field">
+      <label>Test tone</label>
+      <div class="tone">
+        <button type="button" data-tone="left">&#9664; Left</button>
+        <button type="button" data-tone="both">Both</button>
+        <button type="button" data-tone="right">Right &#9654;</button>
+      </div>
+      <div class="hint2">
+        A short beep straight into this speaker's own sink. It mixes with whatever
+        is playing, so nothing needs to be stopped first.
+      </div>
+    </div>
+
+    <div class="field" id="codecField">
+      <label for="fCodec">Bluetooth codec</label>
+      <select id="fCodec"></select>
+      <div class="hint2" id="codecHint"></div>
+    </div>
+
+    <div id="soundNote" class="note" style="display:none"></div>
+    <div class="dlg-actions">
+      <span class="spacer"></span>
+      <button type="button" id="soundClose">Close</button>
+      <button type="button" class="primary" id="codecApply">Apply codec</button>
+    </div>
   </dialog>
 
   <dialog id="logDialog">
@@ -418,6 +451,7 @@
       return acts;
     }
     if (d.connected) {
+      acts.push(`<button data-act="sound" title="test tone and codec">Sound</button>`);
       acts.push(`<button data-act="reconnect">Reconnect</button>`);
       acts.push(`<button data-act="disconnect">Disconnect</button>`);
     } else {
@@ -533,6 +567,7 @@
   }
 
   async function act(kind, device) {
+    if (kind === "sound") return openSound(device);
     if (kind === "repair" && !confirm(
         `Re-pair ${device.name}?\n\nThis forgets the pairing first, so the device ` +
         `must be in pairing mode or it will not come back.`)) return;
@@ -772,6 +807,109 @@
     refreshPlayers();
   }
 
+  // --- sound check (test tone + codec) ----------------------------------------
+
+  let soundTarget = null;   // { label, toneUrl, mac }  -- a device or a player
+
+  function soundNote(text, kind) {
+    const el = $("soundNote");
+    el.style.display = text ? "block" : "none";
+    el.className = "note " + (kind || "warn");
+    el.textContent = text;
+  }
+
+  function openSound(device) {
+    soundTarget = {
+      label: device.name,
+      mac: device.mac,
+      toneUrl: `/api/devices/${encodeURIComponent(device.mac)}/test/`,
+    };
+    $("soundTitle").textContent = `Sound check — ${device.name}`;
+    soundNote("", "");
+    $("soundDialog").showModal();
+    loadCodec();
+  }
+
+  function openSoundForPlayer(player) {
+    soundTarget = {
+      label: player.name,
+      mac: player.mac || null,
+      toneUrl: `/api/players/${encodeURIComponent(player.id)}/test/`,
+    };
+    $("soundTitle").textContent = `Sound check — ${player.name}`;
+    soundNote("", "");
+    $("soundDialog").showModal();
+    loadCodec();
+  }
+
+  async function loadCodec() {
+    const field = $("codecField");
+    const apply = $("codecApply");
+    // Only Bluetooth devices have a codec to choose; a USB DAC has none.
+    if (!soundTarget || !soundTarget.mac) {
+      field.style.display = "none";
+      apply.hidden = true;
+      return;
+    }
+    field.style.display = "";
+    $("fCodec").replaceChildren(new Option("loading…", ""));
+    const data = await call(`/api/devices/${encodeURIComponent(soundTarget.mac)}/codec`);
+    const codec = data.codec || {};
+    if (!codec.available) {
+      field.style.display = "none";
+      apply.hidden = true;
+      // Worth saying out loud: an empty list is a host packaging question.
+      if (codec.active) soundNote(`Codec: ${codec.active} (no alternatives offered by this host).`, "warn");
+      return;
+    }
+    apply.hidden = false;
+    const sel = $("fCodec");
+    sel.replaceChildren();
+    for (const profile of codec.profiles) {
+      const option = new Option(profile.codec, profile.index, profile.current, profile.current);
+      sel.appendChild(option);
+    }
+    const bits = [];
+    // Prefer the profile's own label: the node reports "ldac", the list says "LDAC".
+    const current = codec.profiles.find((profile) => profile.current);
+    if (current || codec.active) bits.push(`Currently ${(current && current.codec) || codec.active}.`);
+    bits.push("Switching drops the link for a moment and restarts this device's players. " +
+              "Latency changes with the codec, so re-check the sync offset afterwards.");
+    if (codec.headset) bits.push("This device is on its headset profile — mono, and it will sound like a phone call.");
+    $("codecHint").textContent = bits.join(" ");
+  }
+
+  async function playTone(channel) {
+    if (!soundTarget) return;
+    soundNote(`playing ${channel}…`, "");
+    const data = await call(soundTarget.toneUrl + channel, { method: "POST" });
+    if (!data.ok) return soundNote(data.error || "the tone failed", "err");
+    // A muted sink plays a perfectly successful silent tone.
+    soundNote(
+      data.test && data.test.muted
+        ? `Played ${channel} — but this sink is muted, so there was nothing to hear.`
+        : `Played ${channel}.`,
+      data.test && data.test.muted ? "warn" : "ok");
+  }
+
+  async function applyCodec() {
+    if (!soundTarget || !soundTarget.mac) return;
+    const index = Number($("fCodec").value);
+    if (Number.isNaN(index)) return;
+    $("codecApply").disabled = true;
+    soundNote("switching codec — the players on this device restart…", "");
+    const data = await call(`/api/devices/${encodeURIComponent(soundTarget.mac)}/codec`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ index }),
+    });
+    $("codecApply").disabled = false;
+    if (!data.ok) return soundNote(data.error || "the switch failed", "err");
+    if (data.players) renderPlayers(data.players);
+    soundNote(`Codec is now ${(data.codec && data.codec.active) || "changed"}.`, "ok");
+    loadCodec();
+  }
+
   async function showLogs(player) {
     $("logTitle").textContent = `Logs — ${player.name}`;
     $("logBody").textContent = "loading…";
@@ -837,6 +975,9 @@
     }
 
     $("dialogDelete").hidden = !player;
+    // Kept out of the row itself: five buttons per row is what makes the table
+    // wider than the card.
+    $("dialogSound").hidden = !player;
     if (player) {
       select.value = player.mac ? "bt:" + player.mac : "sink:" + player.node;
       $("fName").value = player.name;
@@ -1022,6 +1163,17 @@
     setBusy(false, "");
   });
   $("logClose").addEventListener("click", () => $("logDialog").close());
+  $("soundClose").addEventListener("click", () => $("soundDialog").close());
+  $("dialogSound").addEventListener("click", () => {
+    const player = lastPlayers.find((p) => p.id === editing);
+    if (!player) return;
+    $("playerDialog").close();
+    editing = null;
+    openSoundForPlayer(player);
+  });
+  $("codecApply").addEventListener("click", applyCodec);
+  document.querySelectorAll("#soundDialog .tone button").forEach((b) =>
+    b.addEventListener("click", () => playTone(b.dataset.tone)));
 
   scanBtn.addEventListener("click", scan);
   $("showUnnamed").addEventListener("change", () => render(lastDevices));

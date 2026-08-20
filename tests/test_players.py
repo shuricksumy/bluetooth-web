@@ -503,3 +503,270 @@ def test_an_empty_snapserver_host_is_allowed(supervisor):
     supervisor.update_settings({"snapserver_host": ""})
     assert supervisor.settings["snapserver_host"] == ""
     assert supervisor.new_player_defaults()["server"] == "127.0.0.1"
+
+
+# ---- the misroute watchdog --------------------------------------------------
+
+
+def test_a_player_moved_to_another_sink_is_restarted(supervisor, monkeypatch):
+    """The failure that looks healthy from every other angle.
+
+    When a sink disappears and comes back -- a codec switch, a speaker
+    power-cycled -- WirePlumber moves the stream to the default sink and leaves
+    it there. Verified on real hardware: the process is up, the node is back,
+    the panel says "running", and the room is silent.
+    """
+    monkeypatch.setattr(players_mod, "HEALTH_INTERVAL", 0.1)
+    monkeypatch.setattr(players_mod, "MISROUTE_GRACE", 0.4)
+
+    linked = {"to": None}
+    monkeypatch.setattr(players_mod, "stream_sink_for", lambda node: linked["to"])
+
+    player = make(supervisor)
+    player.start()
+    assert wait_for(lambda: player.state == "running"), player.state
+    first_pid = player._proc.pid
+
+    linked["to"] = "auto_null"
+    assert wait_for(lambda: player.state != "running", timeout=10), player.state
+    assert any("instead of" in line for line in player.logs)
+
+    linked["to"] = player.config["node"]
+    assert wait_for(lambda: player.state == "running", timeout=15), player.state
+    assert player._proc.pid != first_pid, "should be a fresh snapclient"
+    player.stop()
+
+
+def test_an_unknown_stream_target_is_not_a_misroute(supervisor, monkeypatch):
+    """No PipeWire, or no links yet, means "don't know" -- not "wrong sink"."""
+    monkeypatch.setattr(players_mod, "HEALTH_INTERVAL", 0.1)
+    monkeypatch.setattr(players_mod, "MISROUTE_GRACE", 0.2)
+    monkeypatch.setattr(players_mod, "stream_sink_for", lambda node: None)
+
+    player = make(supervisor)
+    player.start()
+    assert wait_for(lambda: player.state == "running")
+    pid = player._proc.pid
+    time.sleep(0.8)
+
+    assert player.state == "running"
+    assert player._proc.pid == pid
+    assert player.restarts == 0
+    player.stop()
+
+
+def test_a_momentary_misroute_does_not_restart_the_player(supervisor, monkeypatch):
+    monkeypatch.setattr(players_mod, "HEALTH_INTERVAL", 0.1)
+    monkeypatch.setattr(players_mod, "MISROUTE_GRACE", 5.0)
+
+    linked = {"to": None}
+    monkeypatch.setattr(players_mod, "stream_sink_for", lambda node: linked["to"])
+
+    player = make(supervisor)
+    player.start()
+    assert wait_for(lambda: player.state == "running")
+    pid = player._proc.pid
+
+    linked["to"] = "auto_null"
+    time.sleep(0.4)
+    linked["to"] = player.config["node"]
+    time.sleep(0.4)
+
+    assert player.state == "running"
+    assert player._proc.pid == pid
+    assert player.restarts == 0
+    player.stop()
+
+
+def test_stream_sink_for_follows_the_links_not_the_request(monkeypatch):
+    """target.object stays correct after a stream is moved; the links do not."""
+    node = "bluez_output.00_02_5B_00_FF_04.1"
+    objects = [
+        {"id": 68, "info": {"props": {"node.name": node, "media.class": "Audio/Sink"}}},
+        {"id": 65, "info": {"props": {"node.name": "auto_null", "media.class": "Audio/Sink"}}},
+        {"id": 87, "info": {"props": {"node.name": "Snapcast",
+                                      "media.class": "Stream/Output/Audio",
+                                      "target.object": node}}},
+        {"id": 90, "info": {"output-node-id": 87, "input-node-id": 65}},
+    ]
+    monkeypatch.setattr(players_mod, "_pw_dump", lambda: objects)
+    assert players_mod.stream_sink_for(node) == "auto_null"
+
+    objects[-1] = {"id": 90, "info": {"output-node-id": 87, "input-node-id": 68}}
+    assert players_mod.stream_sink_for(node) == node
+
+
+def test_stream_sink_for_says_nothing_when_there_is_no_stream(monkeypatch):
+    monkeypatch.setattr(players_mod, "_pw_dump", list)
+    assert players_mod.stream_sink_for("bluez_output.X.1") is None
+
+
+# ---- Bluetooth codecs -------------------------------------------------------
+
+
+CARD_DUMP = [
+    {"id": 68, "info": {"props": {
+        "node.name": "bluez_output.00_02_5B_00_FF_04.1",
+        "media.class": "Audio/Sink",
+        "api.bluez5.codec": "ldac"}}},
+    {"id": 66, "info": {
+        "props": {"device.name": "bluez_card.00_02_5B_00_FF_04"},
+        "params": {
+            "Profile": [{"index": 11, "name": "a2dp-sink"}],
+            "EnumProfile": [
+                {"index": 0, "name": "off", "description": "Off"},
+                {"index": 5, "name": "a2dp-sink-sbc",
+                 "description": "High Fidelity Playback (A2DP Sink, codec SBC)"},
+                {"index": 6, "name": "a2dp-sink-sbc_xq",
+                 "description": "High Fidelity Playback (A2DP Sink, codec SBC-XQ)"},
+                {"index": 11, "name": "a2dp-sink",
+                 "description": "High Fidelity Playback (A2DP Sink, codec LDAC)"},
+            ]}}},
+]
+
+
+def test_codec_status_lists_what_the_speaker_and_host_share(monkeypatch):
+    monkeypatch.setattr(players_mod, "_pw_dump", lambda: CARD_DUMP)
+    status = players_mod.codec_status("00:02:5B:00:FF:04")
+
+    assert status["available"] is True
+    assert status["active"] == "ldac"
+    assert status["headset"] is False
+    codecs = {profile["codec"]: profile for profile in status["profiles"]}
+    assert set(codecs) == {"SBC", "SBC-XQ", "LDAC"}
+    # "off" is not a codec, and the profile for the host's preferred codec is
+    # named plain a2dp-sink -- so the name cannot be used to identify it.
+    assert codecs["LDAC"]["name"] == "a2dp-sink"
+    assert codecs["LDAC"]["current"] is True
+    assert codecs["SBC"]["current"] is False
+
+
+def test_codec_status_on_a_device_pipewire_does_not_know(monkeypatch):
+    monkeypatch.setattr(players_mod, "_pw_dump", list)
+    status = players_mod.codec_status("00:02:5B:00:FF:04")
+    assert status["available"] is False
+    assert status["profiles"] == []
+
+
+def test_set_codec_refuses_a_profile_that_is_not_on_offer(monkeypatch):
+    monkeypatch.setattr(players_mod, "_pw_dump", lambda: CARD_DUMP)
+    with pytest.raises(PlayerError) as err:
+        players_mod.set_codec("00:02:5B:00:FF:04", 99)
+    assert "no such codec" in str(err.value)
+
+
+def test_set_codec_refuses_when_the_device_is_not_connected(monkeypatch):
+    monkeypatch.setattr(players_mod, "_pw_dump", list)
+    with pytest.raises(PlayerError) as err:
+        players_mod.set_codec("00:02:5B:00:FF:04", 5)
+    assert "connected" in str(err.value)
+
+
+def test_switching_codec_carries_the_players_across(supervisor, monkeypatch):
+    """A running snapclient must not be left behind by the renegotiation."""
+    monkeypatch.setattr(players_mod, "CODEC_SETTLE_SECONDS", 0.5)
+    switched = []
+    monkeypatch.setattr(players_mod, "set_codec",
+                        lambda mac, index: switched.append((mac, index)))
+    monkeypatch.setattr(players_mod, "codec_status", lambda mac: {"active": "sbc_xq"})
+
+    player = make(supervisor, mac="00:02:5B:00:FF:04",
+                  node=node_for_mac("00:02:5B:00:FF:04"))
+    player.start()
+    assert wait_for(lambda: player.state == "running"), player.state
+    first_pid = player._proc.pid
+
+    result = supervisor.switch_codec("00:02:5B:00:FF:04", 6)
+
+    assert switched == [("00:02:5B:00:FF:04", 6)]
+    assert result["active"] == "sbc_xq"
+    assert wait_for(lambda: player.state == "running"), player.state
+    assert player._proc.pid != first_pid, "the player should have been restarted"
+    player.stop()
+
+
+def test_a_failed_codec_switch_still_brings_the_players_back(supervisor, monkeypatch):
+    monkeypatch.setattr(players_mod, "CODEC_SETTLE_SECONDS", 0.5)
+
+    def boom(mac, index):
+        raise PlayerError("wpctl refused the profile")
+
+    monkeypatch.setattr(players_mod, "set_codec", boom)
+
+    player = make(supervisor, mac="00:02:5B:00:FF:04",
+                  node=node_for_mac("00:02:5B:00:FF:04"))
+    player.start()
+    assert wait_for(lambda: player.state == "running"), player.state
+
+    with pytest.raises(PlayerError):
+        supervisor.switch_codec("00:02:5B:00:FF:04", 6)
+
+    assert wait_for(lambda: player.state == "running", timeout=10), player.state
+    player.stop()
+
+
+# ---- the test tone ----------------------------------------------------------
+
+
+FAKE_PW_PLAY = os.path.join(ROOT, "tests", "fake_pw_play.py")
+TONE_NODE = "bluez_output.00_02_5B_00_FF_04.1"
+
+
+@pytest.fixture
+def tone(tmp_path, monkeypatch):
+    """play_test_tone wired to a pw-play that describes the WAV instead."""
+    monkeypatch.setattr(players_mod, "PW_PLAY", FAKE_PW_PLAY)
+    monkeypatch.setattr(players_mod, "list_sinks",
+                        lambda: [{"id": 68, "node": TONE_NODE, "muted": False,
+                                  "description": "DX5", "bluetooth": True}])
+    out = tmp_path / "tone.json"
+    monkeypatch.setenv("FAKE_PW_PLAY_OUT", str(out))
+    return out
+
+
+@pytest.mark.parametrize("channel,left,right", [
+    ("left", True, False),
+    ("right", False, True),
+    ("both", True, True),
+])
+def test_the_tone_sounds_in_the_channel_you_asked_for(tone, channel, left, right):
+    result = players_mod.play_test_tone(TONE_NODE, channel, seconds=0.1)
+    assert result["channel"] == channel
+    assert result["muted"] is False
+
+    played = json.loads(tone.read_text())
+    assert played["channels"] == 2
+    assert played["node"] == TONE_NODE, "the tone must be aimed at the sink"
+    assert (played["peak_left"] > 1000) is left
+    assert (played["peak_right"] > 1000) is right
+
+
+def test_the_tone_refuses_a_sink_that_is_not_there(tone, monkeypatch):
+    """pw-play exits 0 after playing to the *default* sink when its target is
+    missing -- verified on real hardware -- so an unchecked test would sound
+    from the wrong speaker and still report success."""
+    monkeypatch.setattr(players_mod, "list_sinks", list)
+    with pytest.raises(PlayerError) as err:
+        players_mod.play_test_tone(TONE_NODE, "both", seconds=0.1)
+    assert "is not present" in str(err.value)
+    assert not tone.exists(), "nothing should have been played"
+
+
+def test_the_tone_reports_a_muted_sink(tone, monkeypatch):
+    monkeypatch.setattr(players_mod, "list_sinks",
+                        lambda: [{"id": 68, "node": TONE_NODE, "muted": True}])
+    result = players_mod.play_test_tone(TONE_NODE, "both", seconds=0.1)
+    assert result["muted"] is True
+
+
+def test_the_tone_rejects_a_channel_it_does_not_know(tone):
+    with pytest.raises(PlayerError):
+        players_mod.play_test_tone(TONE_NODE, "middle", seconds=0.1)
+
+
+def test_a_failing_pw_play_is_reported(tone, monkeypatch):
+    monkeypatch.setenv("FAKE_PW_PLAY_RC", "1")
+    monkeypatch.setenv("FAKE_PW_PLAY_STDERR", "cannot connect to PipeWire\n")
+    with pytest.raises(PlayerError) as err:
+        players_mod.play_test_tone(TONE_NODE, "both", seconds=0.1)
+    assert "cannot connect to PipeWire" in str(err.value)
