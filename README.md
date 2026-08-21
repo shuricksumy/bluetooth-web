@@ -131,11 +131,11 @@ bluetoothctl power on
 ```
 
 <details>
-<summary><b>Letting the panel do that step itself</b> (optional, costs isolation)</summary>
+<summary><b>Why the compose files use host networking</b> (and how to opt out)</summary>
 
-The middle command resets the controller at the kernel level, and the panel can
-run it — but only if you hand it two things it does not take by default. Measured
-on a real host:
+The middle command resets the controller at the kernel level, and the panel runs
+it for you — but only with two things the shipped compose files therefore set.
+Measured on a real host:
 
 | Container | `hciconfig hci0` (read) | `hciconfig hci0 up` (reset) |
 | :-- | :-- | :-- |
@@ -148,17 +148,21 @@ Bluetooth sockets live in the network namespace, so **no capability helps withou
 host networking** — that is why the default container cannot reach the HCI layer
 at all, and adding `cap_add` alone changes nothing.
 
-To opt in, add both to the service:
+So the service carries both:
 
 ```yaml
     network_mode: host          # required: HCI sockets are namespaced
     cap_add: [ NET_ADMIN ]      # required: the reset ioctl is privileged
 ```
 
-Then **Reset radio** escalates by itself when the power cycle fails, and reports an
-`hci reset` step. The cost is real: host networking drops the container's network
-isolation and publishes the panel on the host's own port, so this is a deliberate
-trade, not a default.
+**Reset radio** then escalates by itself when a power cycle is not enough, and
+reports an `hci reset` step.
+
+The cost is real, so it is worth stating: host networking drops the container's
+network isolation, and there is no port mapping any more — the panel listens on
+`PORT` directly on the host. **To opt out**, delete those two keys and put
+`ports: ["8088:8080"]` back. Everything else works exactly the same; the panel
+just prints the host commands instead of running them.
 
 </details>
 
@@ -174,12 +178,11 @@ services:
     security_opt:
       - apparmor=unconfined
 
-    # Optional: let "Reset radio" reset the controller at the kernel level when
-    # a power cycle is not enough. BOTH lines are needed -- bluetooth sockets are
-    # namespaced, so CAP_NET_ADMIN alone does nothing without the host's network
-    # namespace (measured; see README). The cost is losing network isolation and
-    # publishing the panel on the host's own port, so this is off by default and
-    # the panel just prints the host commands instead.
+    # Lets "Reset radio" reset the controller at the kernel level when a power
+    # cycle is not enough. BOTH are needed: bluetooth sockets are namespaced, so
+    # CAP_NET_ADMIN does nothing without the host's network namespace. Host
+    # networking has no port mapping, which is why PORT is set below instead of
+    # `ports:` -- Compose rejects a file that has both.
     network_mode: host
     cap_add:
       - NET_ADMIN
@@ -347,8 +350,14 @@ environment; the environment only seeds the defaults.
 
 **It runs as root.** BlueZ's D-Bus policy grants `Pair`/`Trust`/`Remove` to uid 0,
 and on some distributions to a `bluetooth`/`lp` group whose gid differs per host —
-brittle to match from a container. It is still unprivileged in the Docker sense:
-no extra capabilities, no device nodes, no host namespaces.
+brittle to match from a container. Still no `--privileged` and no device nodes.
+
+**The compose files take two things beyond that**, so that Reset radio can fix a
+wedged controller without a shell on the host: `network_mode: host` and
+`CAP_NET_ADMIN`. Together they let the container reset the Bluetooth chip — and
+host networking means it shares your host's network stack rather than an isolated
+one. If you would rather keep the isolation, drop both and restore `ports:`; see
+[When scans stop finding anything](#-when-scans-stop-finding-anything).
 
 **Auth is off by default.** Unset `ADMIN_PASSWORD` means anyone who can reach the
 port can unpair your speakers. Set it, keep this on a trusted LAN, and put TLS in

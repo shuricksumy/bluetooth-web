@@ -5,8 +5,8 @@ services:
     image: ghcr.io/shuricksumy/bluetooth-web-snapclient:latest
     container_name: bluetooth-web
 
-    ports:
-      - "8088:8080"
+    # No `ports:` here on purpose: host networking has no port mapping, and
+    # Compose refuses a file that has both. PORT below is what the panel binds.
 
     # Ubuntu (and any AppArmor host): Docker confines containers with the
     # `docker-default` profile, which grants no D-Bus rules, so the kernel's
@@ -17,22 +17,23 @@ services:
     #security_opt:
     #  - apparmor=unconfined
 
-    # Optional: let "Reset radio" reset the controller at the kernel level when
-    # a power cycle is not enough. BOTH lines are needed -- bluetooth sockets are
-    # namespaced, so CAP_NET_ADMIN alone does nothing without the host's network
-    # namespace (measured; see README). The cost is losing network isolation and
-    # publishing the panel on the host's own port, so this is off by default and
-    # the panel just prints the host commands instead.
-    #network_mode: host
-    #cap_add:
-    #  - NET_ADMIN
+    # Lets "Reset radio" reset the controller at the kernel level when a power
+    # cycle is not enough. BOTH are needed -- bluetooth sockets are namespaced, so
+    # CAP_NET_ADMIN does nothing without the host's network namespace (measured;
+    # see README). Note what host networking changes: there is no port mapping
+    # any more, so the panel listens on PORT below, directly on the host.
+    # Drop these two and restore `ports:` to keep the container on its own
+    # network; the panel then prints the host commands instead of running them.
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
 
     volumes:
       # The Bluetooth half needs only this. Read-write is required: D-Bus is a
-      # bidirectional socket, :ro breaks the connection. No privileged mode, no
-      # cap_add, no host networking -- the panel only makes method calls into
-      # the host's bluetoothd. The three mounts below are for the Snapcast
-      # players; drop them if you only want device pairing.
+      # bidirectional socket, :ro breaks the connection. Still no privileged
+      # mode and no device nodes -- the panel only makes method calls into the
+      # host's bluetoothd. The three mounts below are for the Snapcast players;
+      # drop them if you only want device pairing.
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
       # Players are snapclient processes in this container, so it needs the
       # host's PipeWire session the same way pipewire-snapclient does. Check
@@ -44,6 +45,9 @@ services:
       - ./bluetooth-web-config:/config
 
     environment:
+      # The port the panel binds on the host, since host networking has no
+      # mapping to move it. Browse http://<host>:8088/
+      - PORT=8088
       # HTTP Basic Auth over every route. Leave empty (or drop the line) to
       # disable auth entirely -- only sane on a trusted LAN, since anyone who
       # reaches the port can then pair and unpair your devices.
