@@ -121,18 +121,46 @@ The panel also warns you when a scan discovers nothing new at all — no phone, 
 watch, nothing — because that silence is the symptom, and it is easy to mistake for
 a quiet house.
 
-If the reset cannot bring the controller back, the panel says so and names the
-escape hatch, which needs a shell on the host:
+If the power cycle is not enough, the panel says so and names the escape hatch,
+which by default needs a shell on the host:
 
 ```bash
 bluetoothctl power off
-sudo hciconfig hci0 up      # the panel cannot do this: it needs NET_ADMIN
+sudo hciconfig hci0 up
 bluetoothctl power on
 ```
 
-That last step is deliberate. The container talks to `bluetoothd` over D-Bus and
-holds no network capabilities, so an HCI-level reset is out of its reach — which is
-also why it cannot break anything else on your host.
+<details>
+<summary><b>Letting the panel do that step itself</b> (optional, costs isolation)</summary>
+
+The middle command resets the controller at the kernel level, and the panel can
+run it — but only if you hand it two things it does not take by default. Measured
+on a real host:
+
+| Container | `hciconfig hci0` (read) | `hciconfig hci0 up` (reset) |
+| :-- | :-- | :-- |
+| default bridge network | ✗ no HCI socket at all | ✗ |
+| bridge + `CAP_NET_ADMIN` | ✗ no HCI socket at all | ✗ |
+| `network_mode: host` | ✓ | ✗ `Operation not permitted` |
+| `network_mode: host` + `CAP_NET_ADMIN` | ✓ | ✓ |
+
+Bluetooth sockets live in the network namespace, so **no capability helps without
+host networking** — that is why the default container cannot reach the HCI layer
+at all, and adding `cap_add` alone changes nothing.
+
+To opt in, add both to the service:
+
+```yaml
+    network_mode: host          # required: HCI sockets are namespaced
+    cap_add: [ NET_ADMIN ]      # required: the reset ioctl is privileged
+```
+
+Then **Reset radio** escalates by itself when the power cycle fails, and reports an
+`hci reset` step. The cost is real: host networking drops the container's network
+isolation and publishes the panel on the host's own port, so this is a deliberate
+trade, not a default.
+
+</details>
 
 ## 🚀 Quick start
 

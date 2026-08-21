@@ -1049,7 +1049,7 @@ def test_reset_says_so_when_the_controller_will_not_come_back(quick_reset):
         body = res.get_json()
         assert res.status_code >= 400
         assert body["ok"] is False
-        assert "refused to power back on" in body["error"]
+        assert "would not power back on" in body["error"]
         assert "hciconfig" in body["error"], "the error must name the escape hatch"
     finally:
         app_module.btctl.close()
@@ -1068,5 +1068,55 @@ def test_reset_says_so_when_the_radio_powers_on_but_stays_deaf(quick_reset):
         steps = {s["step"]: s for s in body["steps"]}
         assert steps["power on"]["ok"] is True
         assert steps["discovery probe"]["ok"] is False
+    finally:
+        app_module.btctl.close()
+
+
+def test_reset_escalates_to_an_hci_reset_when_it_is_allowed(quick_reset, tmp_path):
+    """With host networking and CAP_NET_ADMIN the panel can reset the chip itself.
+
+    Measured on a real host: on the default bridge network the HCI socket does
+    not exist at all -- bluetooth sockets are namespaced, so no capability helps
+    -- and with the host namespace but no CAP_NET_ADMIN the ioctl is EPERM. When
+    both are given, this is the rung above asking bluetoothd.
+    """
+    fake = tmp_path / "hciconfig"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+
+    app_module = load_app("stuckradio", MOCK_POWER_FAILURES="99", HCICONFIG=str(fake))
+    try:
+        btctl_mod = sys.modules["btctl"]
+        btctl_mod.POWER_SETTLE = 0.05
+        btctl_mod.PROBE_SECONDS = 0.4
+        btctl_mod.HCICONFIG = str(fake)
+        client = app_module.app.test_client()
+        body = client.post("/api/adapters/reset").get_json()
+        steps = {s["step"]: s for s in body["steps"]}
+        assert "hci reset" in steps, body["steps"]
+        assert steps["hci reset"]["ok"] is True
+    finally:
+        app_module.btctl.close()
+
+
+def test_reset_stays_quiet_about_an_hci_reset_it_cannot_do(quick_reset, tmp_path):
+    """The normal case: no host networking, so the tool refuses. Say what to run."""
+    fake = tmp_path / "hciconfig"
+    fake.write_text(
+        "#!/bin/sh\necho \"Can't open HCI socket.: Address family not supported\" >&2\nexit 1\n")
+    fake.chmod(0o755)
+
+    app_module = load_app("stuckradio", MOCK_POWER_FAILURES="99", HCICONFIG=str(fake))
+    try:
+        btctl_mod = sys.modules["btctl"]
+        btctl_mod.POWER_SETTLE = 0.05
+        btctl_mod.PROBE_SECONDS = 0.4
+        btctl_mod.HCICONFIG = str(fake)
+        client = app_module.app.test_client()
+        body = client.post("/api/adapters/reset").get_json()
+        assert body["ok"] is False
+        assert "hci reset" not in {s["step"] for s in body["steps"]}
+        assert "CAP_NET_ADMIN" in body["error"]
+        assert "hciconfig" in body["error"]
     finally:
         app_module.btctl.close()

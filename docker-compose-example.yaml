@@ -17,6 +17,16 @@ services:
     #security_opt:
     #  - apparmor=unconfined
 
+    # Optional: let "Reset radio" reset the controller at the kernel level when
+    # a power cycle is not enough. BOTH lines are needed -- bluetooth sockets are
+    # namespaced, so CAP_NET_ADMIN alone does nothing without the host's network
+    # namespace (measured; see README). The cost is losing network isolation and
+    # publishing the panel on the host's own port, so this is off by default and
+    # the panel just prints the host commands instead.
+    #network_mode: host
+    #cap_add:
+    #  - NET_ADMIN
+
     volumes:
       # The Bluetooth half needs only this. Read-write is required: D-Bus is a
       # bidirectional socket, :ro breaks the connection. No privileged mode, no

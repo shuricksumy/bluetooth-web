@@ -18,6 +18,7 @@ holding it.
 
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -81,6 +82,14 @@ PAIR_UNAVAILABLE = r"Device [0-9A-Fa-f:]{17} not available"
 POWER_SETTLE = 2.0
 POWER_ATTEMPTS = 3
 PROBE_SECONDS = 6.0
+
+# The kernel-level reset, one rung above asking bluetoothd nicely. Measured on a
+# real host: with the default bridge network the HCI socket does not exist at all
+# (bluetooth sockets live in the network namespace, so no capability helps), with
+# the host's namespace but no CAP_NET_ADMIN the ioctl is EPERM, and with both it
+# works. So this is opt-in -- see README -- and the panel falls back to telling
+# you the command when it is not available.
+HCICONFIG = os.environ.get("HCICONFIG", "hciconfig")
 
 # A scan that turns up nothing *new* is the visible symptom of a controller
 # stuck mid-inquiry: everything still looks healthy -- powered adapter, no
@@ -616,37 +625,79 @@ class Bluetoothctl:
                 steps.append({"step": "power off", "ok": False, "output": str(exc)})
             time.sleep(POWER_SETTLE)
 
-            last = ""
-            for attempt in range(1, POWER_ATTEMPTS + 1):
-                try:
-                    self._send_checked("power on")
-                except BluetoothctlError as exc:
-                    last = str(exc)
-                    time.sleep(POWER_SETTLE)
-                    continue
-                steps.append({
-                    "step": "power on", "ok": True,
-                    "output": "" if attempt == 1 else "took %d attempts" % attempt,
-                })
-                break
-            else:
-                steps.append({"step": "power on", "ok": False, "output": last})
-                raise StepFailure(
-                    "the controller refused to power back on (%s). On the host: "
-                    "sudo hciconfig %s up, then try again."
-                    % (last, self._hci_hint()), steps)
+            if not self._power_on(steps):
+                # Asking bluetoothd was not enough. If this container was given
+                # the host network namespace and CAP_NET_ADMIN, we can reset the
+                # controller ourselves instead of printing homework.
+                if not self._hci_up(steps) or not self._power_on(steps):
+                    raise StepFailure(self._stuck_message("would not power back on"),
+                                      steps)
 
-            seen = self._probe_discovery(probe_seconds)
-            found = "%d device%s seen in %ds" % (
-                seen, "" if seen == 1 else "s", int(probe_seconds))
-            steps.append({"step": "discovery probe", "ok": seen > 0, "output": found})
-            if seen == 0:
+            if self._probe(steps, probe_seconds) == 0:
+                if self._hci_up(steps) and self._power_on(steps):
+                    if self._probe(steps, probe_seconds) > 0:
+                        return steps
                 raise StepFailure(
-                    "the controller powered back on but discovered nothing in "
-                    "%ds, so it may still be stuck. On the host: sudo hciconfig "
-                    "%s up, then reset again."
-                    % (int(probe_seconds), self._hci_hint()), steps)
+                    self._stuck_message("powered back on but discovered nothing"),
+                    steps)
         return steps
+
+    def _power_on(self, steps):
+        """`power on`, retried -- the first attempt after a wedge often fails."""
+        last = ""
+        for attempt in range(1, POWER_ATTEMPTS + 1):
+            try:
+                self._send_checked("power on")
+            except BluetoothctlError as exc:
+                last = str(exc)
+                time.sleep(POWER_SETTLE)
+                continue
+            steps.append({
+                "step": "power on", "ok": True,
+                "output": "" if attempt == 1 else "took %d attempts" % attempt,
+            })
+            return True
+        steps.append({"step": "power on", "ok": False, "output": last})
+        return False
+
+    def _probe(self, steps, seconds):
+        seen = self._probe_discovery(seconds)
+        steps.append({
+            "step": "discovery probe", "ok": seen > 0,
+            "output": "%d device%s seen in %ds" % (
+                seen, "" if seen == 1 else "s", int(seconds)),
+        })
+        return seen
+
+    def _hci_up(self, steps):
+        """Kernel-level reset, when this container is allowed to do one."""
+        hci = self._hci_hint()
+        if not shutil.which(HCICONFIG):
+            return False
+        try:
+            done = subprocess.run(
+                [HCICONFIG, hci, "up"], capture_output=True, text=True, timeout=15
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            steps.append({"step": "hci reset", "ok": False, "output": str(exc)})
+            return False
+        detail = (done.stderr or done.stdout or "").strip().splitlines()
+        if done.returncode != 0:
+            # The two expected refusals: no HCI socket at all (bridge network),
+            # or EPERM (no CAP_NET_ADMIN). Neither is worth a scary step entry;
+            # the caller's message explains what to run on the host instead.
+            return False
+        steps.append({"step": "hci reset", "ok": True,
+                      "output": detail[-1] if detail else "%s up" % hci})
+        return True
+
+    def _stuck_message(self, what):
+        return (
+            "the controller %s. On the host: bluetoothctl power off; "
+            "sudo hciconfig %s up; bluetoothctl power on. (The panel can only do "
+            "that itself with host networking and CAP_NET_ADMIN -- see README.)"
+            % (what, self._hci_hint())
+        )
 
     def _hci_hint(self):
         """Best guess at the selected controller's hciN name, for error text."""
