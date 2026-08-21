@@ -152,6 +152,39 @@
   }
   .field .hint2 { grid-column: 2; font-size: .74rem; color: var(--muted); margin-top: -.3rem; }
   .badge.codec { font-variant-numeric: tabular-nums; }
+  /* Something is happening. Scans and pairings take seconds to tens of seconds,
+     and a disabled button alone does not read as progress. */
+  .busybar { margin: .1rem 0 .8rem; }
+  .busybar-row {
+    display: flex; align-items: center; gap: .45rem;
+    font-size: .82rem; color: var(--muted); margin-bottom: .35rem;
+  }
+  .busybar-track {
+    height: 4px; border-radius: 999px; background: var(--line); overflow: hidden;
+  }
+  .busybar-fill {
+    height: 100%; width: 0; border-radius: 999px; background: var(--accent);
+    transition: width .25s linear;
+  }
+  /* No known duration -- a sliding sliver says "working" without claiming
+     progress it cannot measure. */
+  .busybar-fill.indeterminate {
+    width: 32%; transition: none; animation: slide 1.2s ease-in-out infinite;
+  }
+  @keyframes slide {
+    0% { margin-left: -32%; }
+    100% { margin-left: 100%; }
+  }
+  .spinner {
+    width: 12px; height: 12px; flex: 0 0 auto; border-radius: 50%;
+    border: 2px solid var(--line); border-top-color: var(--accent);
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    .spinner, .busybar-fill.indeterminate { animation: none; }
+    .busybar-fill.indeterminate { width: 100%; opacity: .5; }
+  }
   .tone { display: flex; gap: .35rem; }
   .tone button { margin-left: 0; }
   .dlg-actions { display: flex; align-items: center; gap: .4rem; margin-top: .9rem; }
@@ -191,6 +224,11 @@
   </header>
 
   <div id="notes"></div>
+
+  <div id="busyBar" class="busybar" hidden>
+    <div class="busybar-row"><span class="spinner"></span><span id="busyLabel"></span></div>
+    <div class="busybar-track"><div class="busybar-fill" id="busyFill"></div></div>
+  </div>
 
   <section id="viewDevices" hidden>
   <div class="toolbar">
@@ -527,13 +565,52 @@
     }
   }
 
-  function setBusy(on, label) {
+  let busyTimer = null;
+
+  function startBusy(label, seconds) {
+    const fill = $("busyFill");
+    $("busyBar").hidden = false;
+    clearInterval(busyTimer);
+    const started = Date.now();
+    const tick = () => {
+      const elapsed = (Date.now() - started) / 1000;
+      // A scan has a known length, so count it down -- that is the difference
+      // between "it is working" and "it is nearly done". Everything else only
+      // knows how long it has been going.
+      if (seconds && elapsed < seconds) {
+        fill.classList.remove("indeterminate");
+        fill.style.width = Math.min(100, (elapsed / seconds) * 100) + "%";
+        $("busyLabel").textContent = `${label} — ${Math.ceil(seconds - elapsed)}s left`;
+      } else if (seconds) {
+        // The scan window is over but the server is still answering.
+        fill.classList.add("indeterminate");
+        $("busyLabel").textContent = `${label} — finishing up…`;
+      } else {
+        fill.classList.add("indeterminate");
+        $("busyLabel").textContent = elapsed < 2
+          ? label : `${label} — ${Math.round(elapsed)}s`;
+      }
+    };
+    tick();
+    busyTimer = setInterval(tick, 250);
+  }
+
+  function stopBusy() {
+    clearInterval(busyTimer);
+    busyTimer = null;
+    $("busyBar").hidden = true;
+    $("busyFill").style.width = "0";
+    $("busyFill").classList.remove("indeterminate");
+  }
+
+  function setBusy(on, label, seconds) {
     busy = on;
     scanBtn.disabled = on;
     adapterSel.disabled = on || adapterSel.options.length < 2;
     document.querySelectorAll("tbody button").forEach((b) => (b.disabled = on));
     live.classList.toggle("live", !on);
     statusEl.textContent = label || (on ? "working…" : "idle");
+    if (on) startBusy(label || "working…", seconds); else stopBusy();
   }
 
   // Home Assistant's Ingress serves this page under /api/hassio_ingress/<token>/
@@ -590,7 +667,7 @@
         "Power-cycle the Bluetooth controller?\n\nEverything connected drops for a " +
         "few seconds, and any Bluetooth player will restart itself afterwards. " +
         "This is the fix for scans that find nothing.")) return;
-    setBusy(true, "resetting the radio…");
+    setBusy(true, "Resetting the radio, this takes about 10s");
     const data = await call("/api/adapters/reset", { method: "POST" });
     setNotes(data, data.ok ? "radio reset" : null);
     if (data.devices) render(data.devices);
@@ -600,7 +677,7 @@
 
   async function scan() {
     const seconds = Number(durationSel.value);
-    setBusy(true, `scanning ${seconds}s — connected audio may stutter…`);
+    setBusy(true, "Scanning for devices", seconds);
     const data = await call("/api/scan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
