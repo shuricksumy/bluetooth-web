@@ -169,12 +169,20 @@ services:
   bluetooth-web:
     image: ghcr.io/shuricksumy/bluetooth-web-snapclient:latest
     container_name: bluetooth-web
-    ports:
-      - "8088:8080"
 
     # Ubuntu and any AppArmor host — see "AppArmor" below. Not needed on Debian.
     security_opt:
       - apparmor=unconfined
+
+    # Optional: let "Reset radio" reset the controller at the kernel level when
+    # a power cycle is not enough. BOTH lines are needed -- bluetooth sockets are
+    # namespaced, so CAP_NET_ADMIN alone does nothing without the host's network
+    # namespace (measured; see README). The cost is losing network isolation and
+    # publishing the panel on the host's own port, so this is off by default and
+    # the panel just prints the host commands instead.
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
 
     volumes:
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket   # Bluetooth
@@ -185,7 +193,7 @@ services:
     environment:
       - ADMIN_PASSWORD=changeme        # empty or unset disables auth
       - SNAPSERVER_HOST=192.168.1.50   # optional; also editable in the web UI
-
+      - PORT=8088
     restart: unless-stopped
 ```
 
