@@ -12,6 +12,10 @@ MOCK_MODE selects the scenario:
   nocontroller  reaches a prompt but every command says "No default controller"
   hangs         never prints a prompt -- bluetoothd wedged
   oldbluez      BlueZ < 5.65: `devices Paired` is an invalid argument
+  pairfails     the device answers, then refuses the bond -- not in pairing mode
+  stuckradio    the controller is wedged: nothing is ever discovered, and the
+                first two `power on` attempts fail. A third succeeds and
+                discovery starts working, which is what a reset has to prove.
 """
 import os
 import sys
@@ -54,6 +58,17 @@ CONTROLLERS = [
 ]
 SELECTED = {"mac": CONTROLLERS[0]["mac"]}
 
+# stuckradio: discovery finds nothing until the controller has been power-cycled
+# the hard way, and the first attempts to power it back on fail outright.
+WEDGED = {
+    "stuck": MODE == "stuckradio",
+    # How many `power on` attempts fail before one takes, and whether coming
+    # back up actually unsticks discovery -- a controller that powers on and
+    # still finds nothing is its own failure mode.
+    "power_on_failures": int(os.environ.get("MOCK_POWER_FAILURES", "2")),
+    "stays_stuck": os.environ.get("MOCK_STAYS_STUCK") == "1",
+}
+
 
 def w(text):
     sys.stdout.write(text)
@@ -72,6 +87,13 @@ def listing(kind):
     for mac, dev in STATE.items():
         if kind is None or dev[kind.lower()]:
             line("Device %s %s" % (mac, dev["name"]))
+
+
+def late(text, delay=0.3):
+    """An answer that arrives after the prompt, the way BlueZ really answers."""
+    time.sleep(delay)
+    line(text)
+    prompt()
 
 
 def announce():
@@ -146,6 +168,14 @@ for raw in sys.stdin:
         line("Default agent request successful")
     elif head == "power":
         on = (args[0] if args else "on") == "on"
+        if on and WEDGED["power_on_failures"] > 0 and MODE == "stuckradio":
+            WEDGED["power_on_failures"] -= 1
+            line("Failed to set power on: org.bluez.Error.Failed")
+            prompt()
+            continue
+        if on and not WEDGED["stays_stuck"]:
+            # Coming back up is what unsticks discovery.
+            WEDGED["stuck"] = False
         for c in CONTROLLERS:
             if c["mac"] == SELECTED["mac"]:
                 c["powered"] = on
@@ -153,7 +183,10 @@ for raw in sys.stdin:
     elif head == "scan":
         if args and args[0] == "on":
             line("Discovery started")
-            threading.Thread(target=announce, daemon=True).start()
+            # A wedged controller accepts `scan on` and then finds nothing --
+            # that is exactly what makes it hard to spot.
+            if not WEDGED["stuck"]:
+                threading.Thread(target=announce, daemon=True).start()
         else:
             line("Discovery stopped")
     elif head in ("pair", "trust", "connect", "disconnect", "remove") and args:
@@ -162,8 +195,16 @@ for raw in sys.stdin:
         if dev is None:
             line("Device %s not available" % mac)
         elif head == "pair":
-            dev["paired"] = True
-            line("Pairing successful")
+            # The real REPL acknowledges, prints its prompt, and only answers
+            # seconds later -- which is what made a failed pairing look fine.
+            line("Attempting to pair with %s" % mac)
+            prompt()
+            verdict = ("Failed to pair: org.bluez.Error.AuthenticationFailed"
+                       if MODE == "pairfails" else "Pairing successful")
+            if MODE != "pairfails":
+                dev["paired"] = True
+            threading.Thread(target=late, args=(verdict,), daemon=True).start()
+            continue
         elif head == "trust":
             dev["trusted"] = True
             line("Changing %s trust succeeded" % mac)

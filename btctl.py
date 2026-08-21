@@ -70,6 +70,30 @@ DEFAULT_TIMEOUT = 15.0
 START_TIMEOUT = 15.0
 # Pairing waits on the peer device (and possibly a human pressing a button).
 PAIR_TIMEOUT = 60.0
+
+# `pair` is acknowledged immediately and answered much later -- see pair().
+PAIR_SUCCESS = r"Pairing successful"
+PAIR_FAILED = r"Failed to pair:\s*(?P<why>[^\r\n]+)"
+PAIR_UNAVAILABLE = r"Device [0-9A-Fa-f:]{17} not available"
+
+# Recovering a wedged controller: power off, wait, power on -- and the first
+# power on after a wedge often fails on its own, so try more than once.
+POWER_SETTLE = 2.0
+POWER_ATTEMPTS = 3
+PROBE_SECONDS = 6.0
+
+# A scan that turns up nothing *new* is the visible symptom of a controller
+# stuck mid-inquiry: everything still looks healthy -- powered adapter, no
+# errors, bluetoothd up -- and nothing is ever discovered again. A real scan
+# almost always sees something, if only a passing phone advertising a random
+# address, so silence is worth mentioning. Only for scans long enough to mean
+# it, hence the threshold.
+STUCK_SCAN_SECONDS = 5.0
+STUCK_HINT = (
+    "that scan discovered nothing new, not even a passing phone or watch. If "
+    "that keeps happening the controller may be stuck -- Reset radio "
+    "power-cycles it."
+)
 CONNECT_TIMEOUT = 45.0
 # How long re-pairing scans for the device it just forgot.
 REDISCOVER_TIMEOUT = 20.0
@@ -569,10 +593,97 @@ class Bluetoothctl:
                 pass
             return adapters
 
+    def reset_adapter(self, probe_seconds=None):
+        """Power the controller off and on again, then prove it still discovers.
+
+        The failure this exists for: the controller wedges mid-inquiry and every
+        scan comes back empty while everything looks healthy -- adapter powered,
+        bluetoothd running, nothing in the panel to see. Observed on a Realtek
+        dongle, with the kernel logging "Failed to cancel inquiry -16" and only
+        a power cycle bringing discovery back.
+
+        Disconnects anything currently connected, so callers should confirm.
+        """
+        probe_seconds = PROBE_SECONDS if probe_seconds is None else probe_seconds
+        steps = []
+        with self._locked(-1):
+            try:
+                self._send("power off")
+                steps.append({"step": "power off", "ok": True, "output": ""})
+            except BluetoothctlError as exc:
+                # Not fatal: a controller that will not power down may still
+                # come back with the power on below.
+                steps.append({"step": "power off", "ok": False, "output": str(exc)})
+            time.sleep(POWER_SETTLE)
+
+            last = ""
+            for attempt in range(1, POWER_ATTEMPTS + 1):
+                try:
+                    self._send_checked("power on")
+                except BluetoothctlError as exc:
+                    last = str(exc)
+                    time.sleep(POWER_SETTLE)
+                    continue
+                steps.append({
+                    "step": "power on", "ok": True,
+                    "output": "" if attempt == 1 else "took %d attempts" % attempt,
+                })
+                break
+            else:
+                steps.append({"step": "power on", "ok": False, "output": last})
+                raise StepFailure(
+                    "the controller refused to power back on (%s). On the host: "
+                    "sudo hciconfig %s up, then try again."
+                    % (last, self._hci_hint()), steps)
+
+            seen = self._probe_discovery(probe_seconds)
+            found = "%d device%s seen in %ds" % (
+                seen, "" if seen == 1 else "s", int(probe_seconds))
+            steps.append({"step": "discovery probe", "ok": seen > 0, "output": found})
+            if seen == 0:
+                raise StepFailure(
+                    "the controller powered back on but discovered nothing in "
+                    "%ds, so it may still be stuck. On the host: sudo hciconfig "
+                    "%s up, then reset again."
+                    % (int(probe_seconds), self._hci_hint()), steps)
+        return steps
+
+    def _hci_hint(self):
+        """Best guess at the selected controller's hciN name, for error text."""
+        try:
+            selected = next(
+                (a["mac"] for a in self.list_adapters() if a.get("selected")), None
+            )
+            return adapter_paths().get(selected, "hci0")
+        except Exception:
+            return "hci0"
+
+    def _known_macs(self):
+        return {device["mac"] for device in self.list_devices()}
+
+    def _probe_discovery(self, seconds):
+        """Scan briefly and count what turns up that we did not already know.
+
+        Counting *new* addresses rather than devices in the list is the point:
+        a stuck controller still lists everything BlueZ remembers, so a healthy
+        looking table proves nothing about whether the radio is hearing.
+        """
+        before = self._known_macs()
+        self._send_checked("scan on")
+        try:
+            time.sleep(seconds)
+        finally:
+            try:
+                self._send("scan off")
+            except BluetoothctlError:
+                pass
+        return len(self._known_macs() - before)
+
     # ---- actions -----------------------------------------------------------
 
     def scan(self, duration):
         with self._locked(-1):
+            before = self._known_macs()
             self._send_checked("scan on")
             try:
                 time.sleep(duration)
@@ -582,14 +693,68 @@ class Bluetoothctl:
                     self._send("scan off")
                 except BluetoothctlError:
                     pass
-            return self.list_devices()
+            devices = self.list_devices()
+            # Re-evaluated every scan: the hint must disappear the moment the
+            # radio starts hearing things again.
+            self.warnings = [w for w in self.warnings if w != STUCK_HINT]
+            found = {device["mac"] for device in devices} - before
+            if not found and duration >= STUCK_SCAN_SECONDS:
+                self._warn(STUCK_HINT)
+            return devices
 
     def pair(self, mac):
-        out = self._send("pair %s" % mac, timeout=PAIR_TIMEOUT)
-        failure = _first_failure_line(out)
-        if failure and "AlreadyExists" not in failure:
-            raise BluetoothctlError(failure)
-        return out
+        """Pair, and wait for the verdict rather than the acknowledgement.
+
+        bluetoothctl answers `pair` with "Attempting to pair with ..." and
+        reprints its prompt at once; the outcome -- "Pairing successful", or
+        "Failed to pair: org.bluez.Error.AuthenticationFailed" when the speaker
+        is not in pairing mode -- arrives seconds later as an asynchronous line.
+        Stopping at the first prompt reported every failed pairing as a success,
+        which is the one case where the truth matters: the panel said pair ok,
+        trust ok, connect ok, while BlueZ still had `Paired: no`.
+        """
+        with self._locked(-1):
+            child = self._ensure_started()
+            self._drain(child)
+            child.sendline("pair %s" % mac)
+            try:
+                index = child.expect(
+                    [PAIR_SUCCESS, PAIR_FAILED, PAIR_UNAVAILABLE],
+                    timeout=PAIR_TIMEOUT,
+                )
+            except pexpect.EOF:
+                self._child = None
+                raise BluetoothUnavailable(
+                    "bluetoothctl exited while pairing with %s" % mac
+                ) from None
+            except pexpect.TIMEOUT:
+                raise BluetoothctlError(
+                    "no answer from %s after %ds -- is it in pairing mode?"
+                    % (mac, int(PAIR_TIMEOUT))
+                ) from None
+
+            answer = strip_ansi(child.after or "").strip()
+            match = child.match
+            # The verdict is followed by another prompt. Wait for it rather than
+            # draining on a timer: if it lands after the drain gives up, the
+            # *next* command's expect() matches that stale prompt and returns a
+            # truncated answer -- a device list one line short, in practice.
+            try:
+                child.expect(PROMPT, timeout=POWER_SETTLE)
+            except (pexpect.TIMEOUT, pexpect.EOF):
+                pass
+            self._drain(child)
+
+            if index == 0:
+                return answer
+            if index == 2:
+                raise BluetoothctlError(
+                    "%s is not available -- scan for it, then pair" % mac
+                )
+            why = (match.group("why") if match else "").strip()
+            if "AlreadyExists" in why:
+                return "already paired"
+            raise BluetoothctlError(_pair_hint(why))
 
     def trust(self, mac):
         return self._send_checked("trust %s" % mac)
@@ -724,6 +889,20 @@ class StepFailure(BluetoothctlError):
 
 def _has_name(name, mac):
     return name.strip().upper().replace("-", ":") != mac.upper()
+
+
+def _pair_hint(why):
+    """Turn a BlueZ pairing error into something a person can act on."""
+    why = why or "unknown error"
+    if "AuthenticationFailed" in why or "AuthenticationCanceled" in why:
+        return (
+            "%s -- the device refused the bond. Put it in pairing mode (most "
+            "speakers want the button held until it flashes) and try again; if "
+            "it still refuses, clear its own list of paired devices." % why
+        )
+    if "AuthenticationTimeout" in why or "ConnectionAttemptFailed" in why:
+        return "%s -- the device stopped answering. Wake it and try again." % why
+    return why
 
 
 def _first_failure_line(out):

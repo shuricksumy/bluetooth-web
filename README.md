@@ -44,6 +44,7 @@ slightly out of step with everything else in the house.
 | 🔁 **It heals itself** | Turn a speaker off and on: it reconnects and its player comes back, on its own. |
 | ▶️ **See and control what is playing** | Cover art, title, artist, volume, play / pause / skip — per room. |
 | 🧭 **No node names to copy** | Pick the speaker; the audio device name is worked out for you. |
+| 🔄 **Recover a deaf radio** | One button power-cycles a wedged controller and checks it can hear again. |
 | 🎚️ **Sound check** | A left/right test tone, and the Bluetooth codec (LDAC, aptX HD, SBC-XQ …) as a dropdown. |
 | 🏷️ **The codec, on the row** | Each Bluetooth player shows what its link actually negotiated — not what was asked for. |
 
@@ -103,6 +104,35 @@ for its output to appear, and if the speaker later drops off, brings both back.
 </details>
 
 **Running more than one room?** The [Home Audio Stack](https://github.com/shuricksumy/home-audio-stack) has a [complete compose file](https://github.com/shuricksumy/home-audio-stack/tree/main/examples) with this panel alongside Music Assistant, the DACs and the LED strips.
+
+### 🔄 When scans stop finding anything
+
+Bluetooth controllers wedge. The one on my own host stuck itself mid-inquiry: the
+adapter still reported *powered*, `bluetoothd` was fine, the panel showed no error
+— and every scan came back empty, from the panel and from the host's own
+`bluetoothctl` alike. The kernel was logging `hci0: Failed to cancel inquiry -16`
+where nobody was looking.
+
+**Devices → Reset radio** power-cycles the controller and then *proves it works*:
+it scans briefly and reports how many devices it heard. "Powered on" is not the
+same as "hearing", and only the second one is worth reporting.
+
+The panel also warns you when a scan discovers nothing new at all — no phone, no
+watch, nothing — because that silence is the symptom, and it is easy to mistake for
+a quiet house.
+
+If the reset cannot bring the controller back, the panel says so and names the
+escape hatch, which needs a shell on the host:
+
+```bash
+bluetoothctl power off
+sudo hciconfig hci0 up      # the panel cannot do this: it needs NET_ADMIN
+bluetoothctl power on
+```
+
+That last step is deliberate. The container talks to `bluetoothd` over D-Bus and
+holds no network capabilities, so an HCI-level reset is out of its reach — which is
+also why it cannot break anything else on your host.
 
 ## 🚀 Quick start
 
@@ -307,6 +337,7 @@ Every route returns JSON. `<mac>` must match the pattern above or you get a `400
 | `POST` | `/api/repair/<mac>` | Forget, rediscover, pair again. |
 | `POST` | `/api/{connect,disconnect,trust,remove}/<mac>` | The individual steps. |
 | `GET` | `/api/adapters` · `POST /api/adapter/<mac>` | List and select controllers. |
+| `POST` | `/api/adapters/reset` | Power-cycle the controller, then prove it can still discover. |
 | `GET` | `/api/players` · `POST /api/players` | List and create players. |
 | `PATCH`/`DELETE` | `/api/players/<id>` | Update (restarts a running player) / remove. |
 | `POST` | `/api/players/<id>/{start,stop,restart}` | Lifecycle. |

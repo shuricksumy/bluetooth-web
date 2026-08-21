@@ -206,6 +206,7 @@
       </select>
     </label>
     <span class="spacer"></span>
+    <button id="resetRadio" title="power-cycle the Bluetooth controller">Reset radio</button>
     <button id="scan" class="primary">Scan for new devices</button>
   </div>
 
@@ -581,6 +582,19 @@
     if (data.devices) render(data.devices);
     lastAction = data.ok ? `${kind} ok` : `${kind} failed`;
     setBusy(false, lastAction);
+    loadAdapters();
+  }
+
+  async function resetRadio() {
+    if (!confirm(
+        "Power-cycle the Bluetooth controller?\n\nEverything connected drops for a " +
+        "few seconds, and any Bluetooth player will restart itself afterwards. " +
+        "This is the fix for scans that find nothing.")) return;
+    setBusy(true, "resetting the radio…");
+    const data = await call("/api/adapters/reset", { method: "POST" });
+    setNotes(data, data.ok ? "radio reset" : null);
+    if (data.devices) render(data.devices);
+    setBusy(false, data.ok ? "radio reset" : "reset failed");
     loadAdapters();
   }
 
@@ -1231,6 +1245,7 @@
     editing = null;
     openSoundForPlayer(player);
   });
+  $("resetRadio").addEventListener("click", resetRadio);
   $("codecApply").addEventListener("click", applyCodec);
   $("fCodec").addEventListener("change", describeCodec);
   document.querySelectorAll("#soundDialog .tone button").forEach((b) =>

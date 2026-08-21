@@ -216,6 +216,27 @@ def api_adapters():
     return jsonify(adapters=adapters)
 
 
+@app.post("/api/adapters/reset")
+def api_reset_adapter():
+    """Power-cycle the controller: the fix for a radio that finds nothing.
+
+    Deliberately its own route rather than part of adapter selection -- it
+    disconnects every connected device, so the UI confirms first.
+    """
+    try:
+        steps = btctl.reset_adapter()
+    except StepFailure as exc:
+        return jsonify(ok=False, error=str(exc), steps=exc.steps, action="reset"), exc.status
+    except BluetoothctlError as exc:
+        return jsonify(ok=False, error=str(exc), action="reset"), exc.status
+    try:
+        devices = btctl.list_devices(lock_timeout=DEVICES_LOCK_TIMEOUT)
+        cache_devices(devices)
+    except BluetoothctlError:
+        devices, _ = cached_devices()
+    return jsonify(devices_payload(devices, ok=True, action="reset", steps=steps))
+
+
 @app.post("/api/adapter/<mac>")
 def api_select_adapter(mac):
     """Switch which controller every other route acts on."""

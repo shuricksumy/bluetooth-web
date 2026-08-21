@@ -924,3 +924,149 @@ def test_switching_codec_reports_what_it_did(player_client, monkeypatch):
     assert res.status_code == 200
     assert res.get_json()["codec"]["active"] == "sbc_xq"
     assert calls == [("AA:BB:CC:DD:EE:01", 6)]
+
+
+# ---- pairing tells the truth -------------------------------------------------
+
+
+def test_a_refused_pairing_is_reported_as_a_failure():
+    """The verdict arrives after the prompt, so it used to be missed entirely.
+
+    bluetoothctl answers `pair` with "Attempting to pair with ..." and reprints
+    its prompt; "Failed to pair: org.bluez.Error.AuthenticationFailed" lands
+    seconds later. Reading only up to the prompt reported pair ok / trust ok /
+    connect ok while BlueZ still said `Paired: no` -- seen on real hardware.
+    """
+    app_module = load_app("pairfails")
+    try:
+        client = app_module.app.test_client()
+        res = client.post("/api/pair/AA:BB:CC:DD:EE:03")
+        body = res.get_json()
+        assert res.status_code >= 400
+        assert body["ok"] is False
+        assert "AuthenticationFailed" in body["error"]
+        assert "pairing mode" in body["error"]
+        assert body["steps"][0]["step"] == "pair"
+        assert body["steps"][0]["ok"] is False
+        listed = client.get("/api/devices").get_json()["devices"]
+        target = next(d for d in listed if d["mac"] == "AA:BB:CC:DD:EE:03")
+        assert target["paired"] is False, "a refused bond must not look paired"
+    finally:
+        app_module.btctl.close()
+
+
+def test_a_successful_pairing_still_reports_success(client):
+    body = client.post("/api/pair/AA:BB:CC:DD:EE:03").get_json()
+    assert body["ok"] is True
+    assert [s["step"] for s in body["steps"]] == ["pair", "trust", "connect"]
+    target = next(d for d in body["devices"] if d["mac"] == "AA:BB:CC:DD:EE:03")
+    assert target["paired"] is True
+
+
+# ---- recovering a wedged controller -----------------------------------------
+
+
+@pytest.fixture
+def quick_reset(monkeypatch):
+    """Shorten the reset's own waits; the behaviour under test is the sequence."""
+    btctl_mod = sys.modules["btctl"]
+    monkeypatch.setattr(btctl_mod, "POWER_SETTLE", 0.05)
+    monkeypatch.setattr(btctl_mod, "PROBE_SECONDS", 0.4)
+    return btctl_mod
+
+
+def test_a_scan_that_finds_nothing_warns_about_the_radio():
+    """The symptom of a stuck controller is silence, which looks like calm."""
+    app_module = load_app("stuckradio")
+    try:
+        sys.modules["btctl"].STUCK_SCAN_SECONDS = 0.1
+        client = app_module.app.test_client()
+        body = client.post("/api/scan", json={"duration": 0.2}).get_json()
+        assert body["ok"] is True
+        assert any("stuck" in w for w in body["warnings"]), body["warnings"]
+    finally:
+        app_module.btctl.close()
+
+
+def test_reset_recovers_a_wedged_radio(quick_reset):
+    """power off, power on -- retried, because the first attempts fail -- then
+    a discovery probe, because "powered on" is not the same as "working"."""
+    app_module = load_app("stuckradio")
+    try:
+        sys.modules["btctl"].POWER_SETTLE = 0.05
+        sys.modules["btctl"].PROBE_SECONDS = 0.4
+        client = app_module.app.test_client()
+        body = client.post("/api/adapters/reset").get_json()
+        assert body["ok"] is True, body
+        steps = {s["step"]: s for s in body["steps"]}
+        assert steps["power on"]["ok"] is True
+        assert "attempts" in steps["power on"]["output"]
+        assert steps["discovery probe"]["ok"] is True
+        assert "seen in" in steps["discovery probe"]["output"]
+    finally:
+        app_module.btctl.close()
+
+
+def test_a_scan_that_finds_something_does_not_warn(client):
+    """The hint must not nag on a healthy radio."""
+    sys.modules["btctl"].STUCK_SCAN_SECONDS = 0.1
+    body = client.post("/api/scan", json={"duration": 1}).get_json()
+    assert body["ok"] is True
+    assert not any("stuck" in w for w in body["warnings"]), body["warnings"]
+
+
+def test_the_stuck_hint_clears_once_the_radio_hears_again():
+    """It is re-evaluated per scan, not latched for the life of the process."""
+    app_module = load_app("stuckradio")
+    try:
+        btctl_mod = sys.modules["btctl"]
+        btctl_mod.STUCK_SCAN_SECONDS = 0.1
+        client = app_module.app.test_client()
+        first = client.post("/api/scan", json={"duration": 0.3}).get_json()
+        assert any("stuck" in w for w in first["warnings"]), first["warnings"]
+
+        # Power on is what unwedges the mock, the way it did the real dongle.
+        btctl_mod.POWER_SETTLE = 0.05
+        btctl_mod.PROBE_SECONDS = 0.4
+        client.post("/api/adapters/reset")
+        # The reset's own probe already discovered what was in the air, so give
+        # the next scan something genuinely new to find: the mock keeps a
+        # removed device advertising, exactly as a real one would.
+        client.post("/api/remove/AA:BB:CC:DD:EE:04")
+        again = client.post("/api/scan", json={"duration": 0.3}).get_json()
+        assert not any("stuck" in w for w in again["warnings"]), again["warnings"]
+    finally:
+        app_module.btctl.close()
+
+
+def test_reset_says_so_when_the_controller_will_not_come_back(quick_reset):
+    app_module = load_app("stuckradio", MOCK_POWER_FAILURES="99")
+    try:
+        sys.modules["btctl"].POWER_SETTLE = 0.05
+        sys.modules["btctl"].PROBE_SECONDS = 0.4
+        client = app_module.app.test_client()
+        res = client.post("/api/adapters/reset")
+        body = res.get_json()
+        assert res.status_code >= 400
+        assert body["ok"] is False
+        assert "refused to power back on" in body["error"]
+        assert "hciconfig" in body["error"], "the error must name the escape hatch"
+    finally:
+        app_module.btctl.close()
+
+
+def test_reset_says_so_when_the_radio_powers_on_but_stays_deaf(quick_reset):
+    """The nastier case: BlueZ is happy, and still nothing is ever discovered."""
+    app_module = load_app("stuckradio", MOCK_POWER_FAILURES="0", MOCK_STAYS_STUCK="1")
+    try:
+        sys.modules["btctl"].POWER_SETTLE = 0.05
+        sys.modules["btctl"].PROBE_SECONDS = 0.4
+        client = app_module.app.test_client()
+        body = client.post("/api/adapters/reset").get_json()
+        assert body["ok"] is False
+        assert "discovered nothing" in body["error"]
+        steps = {s["step"]: s for s in body["steps"]}
+        assert steps["power on"]["ok"] is True
+        assert steps["discovery probe"]["ok"] is False
+    finally:
+        app_module.btctl.close()
